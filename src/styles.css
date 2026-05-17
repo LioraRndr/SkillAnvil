@@ -497,6 +497,34 @@ button {
   line-height: 1.42;
 }
 
+.agent-presence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-height: 22px;
+}
+
+.agent-presence span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line));
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--accent) 76%, var(--text));
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.card-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;
@@ -572,7 +600,8 @@ button {
 }
 
 .file-list,
-.sync-list {
+.sync-list,
+.tag-picker {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -580,7 +609,8 @@ button {
 }
 
 .file-list button,
-.sync-list button {
+.sync-list button,
+.tag-picker button {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -596,6 +626,26 @@ button {
 
 .sync-list button {
   justify-content: space-between;
+}
+
+.tag-picker {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag-picker button {
+  width: auto;
+  min-height: 28px;
+  padding: 4px 8px;
+  border-color: var(--line);
+  background: var(--panel-soft);
+}
+
+.tag-picker button.selected {
+  border-color: color-mix(in srgb, var(--tag-color) 76%, var(--line));
+  color: var(--text);
+  background: color-mix(in srgb, var(--tag-color) 18%, transparent);
 }
 
 .file-tree-group {
@@ -956,6 +1006,158 @@ input[type="checkbox"]:focus-visible {
 .custom-agent-row button:hover {
   border-color: var(--line-strong);
   background: var(--elevated);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.sync-modal {
+  display: flex;
+  width: min(680px, 100%);
+  max-height: min(620px, calc(100vh - 48px));
+  flex-direction: column;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-solid);
+  box-shadow: var(--shadow);
+}
+
+.sync-modal header,
+.sync-modal footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+}
+
+.sync-modal header {
+  border-bottom: 1px solid var(--line);
+}
+
+.sync-modal footer {
+  border-top: 1px solid var(--line);
+}
+
+.sync-modal h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  letter-spacing: 0;
+}
+
+.sync-modal p,
+.muted-copy {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.sync-target-table {
+  display: flex;
+  overflow: auto;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+
+.sync-target-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.sync-target-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.sync-target-row input[type="checkbox"]::before {
+  top: 3px;
+  left: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.sync-target-row input[type="checkbox"]:checked::before {
+  transform: none;
+}
+
+.sync-target-row.disabled {
+  opacity: 0.66;
+}
+
+.sync-target-row strong,
+.sync-target-row em {
+  display: block;
+}
+
+.sync-target-row em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-badge {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.sync-badge.same {
+  border-color: color-mix(in srgb, var(--good) 45%, transparent);
+  color: var(--good);
+}
+
+.sync-badge.different {
+  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
+  color: var(--warn);
+}
+
+.sync-badge.missing {
+  border-color: color-mix(in srgb, var(--accent) 56%, transparent);
+  color: var(--accent);
+}
+
+.sync-modal footer button {
+  min-height: 32px;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--panel-soft);
+}
+
+.sync-modal footer button.primary {
+  border-color: transparent;
+  color: #f8f4ea;
+  background: var(--accent);
+}
+
+.sync-modal button:disabled,
+.sync-target-row input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .statusbar {

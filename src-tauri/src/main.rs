@@ -16,10 +16,10 @@ use std::{
 };
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, State, WindowEvent,
 };
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -213,6 +213,8 @@ fn main() {
                     .unwrap_or(true);
                 if minimize {
                     let _ = window.hide();
+                    #[cfg(target_os = "macos")]
+                    let _ = window.app_handle().set_dock_visibility(false);
                     api.prevent_close();
                 }
             }
@@ -261,9 +263,10 @@ fn setup_tray(app: &AppHandle) -> AppResult<()> {
         .map_err(|err| AppError::Message(err.to_string()))?;
     let menu = Menu::with_items(app, &[&open, &scan, &quit])
         .map_err(|err| AppError::Message(err.to_string()))?;
-    TrayIconBuilder::new()
+    let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("SkillAnvil")
         .menu(&menu)
+        .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "scan" => {
@@ -274,13 +277,35 @@ fn setup_tray(app: &AppHandle) -> AppResult<()> {
             "quit" => app.exit(0),
             _ => {}
         })
-        .build(app)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+    tray.build(app)
         .map_err(|err| AppError::Message(err.to_string()))?;
     Ok(())
 }
 
 fn setup_shortcut(app: &AppHandle) -> AppResult<()> {
-    let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyK);
+    let settings = if let Some(state) = app.try_state::<AppState>() {
+        load_settings(&state.db_path).unwrap_or_else(|_| default_settings())
+    } else {
+        default_settings()
+    };
+    register_shortcut(app, &settings.shortcut)
+}
+
+fn register_shortcut(app: &AppHandle, shortcut: &str) -> AppResult<()> {
+    let _ = app.global_shortcut().unregister_all();
     let app_handle = app.clone();
     let register_result =
         app.global_shortcut()
@@ -290,13 +315,18 @@ fn setup_shortcut(app: &AppHandle) -> AppResult<()> {
                 }
             });
     if let Err(err) = register_result {
-        eprintln!("Global shortcut Ctrl+Shift+K was not registered: {err}");
+        return Err(AppError::Message(format!(
+            "全局快捷键 {shortcut} 注册失败：{err}"
+        )));
     }
     Ok(())
 }
 
 fn show_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -629,7 +659,12 @@ fn get_settings(state: State<AppState>) -> AppResult<Settings> {
 }
 
 #[tauri::command]
-fn update_settings(state: State<AppState>, settings: Settings) -> AppResult<Settings> {
+fn update_settings(
+    app: AppHandle,
+    state: State<AppState>,
+    settings: Settings,
+) -> AppResult<Settings> {
+    register_shortcut(&app, &settings.shortcut)?;
     let conn = Connection::open(&state.db_path)?;
     conn.execute(
         "insert into settings(key, value) values('settings', ?1)
@@ -1051,6 +1086,12 @@ fn load_settings(db_path: &Path) -> AppResult<Settings> {
 }
 
 fn normalize_settings(mut settings: Settings) -> Settings {
+    #[cfg(target_os = "macos")]
+    {
+        if settings.shortcut == "Ctrl+Shift+K" {
+            settings.shortcut = default_shortcut();
+        }
+    }
     if settings.custom_agents.is_empty() {
         settings.custom_agents = default_agent_configs();
         return settings;
@@ -1090,7 +1131,14 @@ fn default_theme() -> String {
 }
 
 fn default_shortcut() -> String {
-    "Ctrl+Shift+K".into()
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd+Shift+K".into()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Ctrl+Shift+K".into()
+    }
 }
 
 fn default_true() -> bool {

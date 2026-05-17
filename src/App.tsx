@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { ink } from "ink-mde";
 import type { Instance } from "ink-mde";
 import {
@@ -32,11 +33,16 @@ type ViewMode = "grid" | "list";
 type Pane = "skills" | "settings";
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 type SelectOption<T extends string> = { value: T; label: string };
+type SyncDraft = {
+  skill: Skill;
+  targets: SyncTargetStatus[];
+  selectedAgentIds: string[];
+};
 
 const defaultSettings: Settings = {
   language: "zh-CN",
   theme: "dark",
-  shortcut: "Ctrl+Shift+K",
+  shortcut: navigator.platform.toLowerCase().includes("mac") ? "Cmd+Shift+K" : "Ctrl+Shift+K",
   minimizeToTray: true,
   customAgents: [],
   snapshotsEnabled: true
@@ -63,6 +69,8 @@ export default function App() {
   const [syncTargets, setSyncTargets] = useState<SyncTargetStatus[]>([]);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [scanIssues, setScanIssues] = useState<ScanIssue[]>([]);
+  const [syncDraft, setSyncDraft] = useState<SyncDraft | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
 
@@ -79,6 +87,16 @@ export default function App() {
         .includes(q);
     });
   }, [filter, query, skills]);
+
+  const agentPresenceBySkillName = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const skill of skills) {
+      const ids = groups.get(skill.name) ?? [];
+      if (!ids.includes(skill.agentId)) ids.push(skill.agentId);
+      groups.set(skill.name, ids);
+    }
+    return groups;
+  }, [skills]);
 
   useEffect(() => {
     void boot();
@@ -230,6 +248,77 @@ export default function App() {
     }
   }
 
+  async function openSyncPanel(skill: Skill) {
+    setError(null);
+    setSyncBusy(true);
+    try {
+      const targets = await api.getSyncTargets(skill.id);
+      setSyncDraft({
+        skill,
+        targets,
+        selectedAgentIds: targets
+          .filter((target) => target.status !== "same")
+          .map((target) => target.agentId)
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  function toggleSyncDraftTarget(agentId: string) {
+    setSyncDraft((draft) => {
+      if (!draft) return draft;
+      const selected = new Set(draft.selectedAgentIds);
+      if (selected.has(agentId)) {
+        selected.delete(agentId);
+      } else {
+        selected.add(agentId);
+      }
+      return { ...draft, selectedAgentIds: Array.from(selected) };
+    });
+  }
+
+  async function confirmSyncDraft() {
+    if (!syncDraft || syncDraft.selectedAgentIds.length === 0) return;
+    const selectedTargets = syncDraft.targets.filter((target) => syncDraft.selectedAgentIds.includes(target.agentId));
+    const overwriteTargets = selectedTargets.filter((target) => target.status === "different");
+    const details = [
+      `源 Skill：${syncDraft.skill.displayName}`,
+      `源路径：${syncDraft.skill.dirPath}`,
+      `目标：${selectedTargets.map((target) => `${target.agentName}（${statusLabel(target.status)}）`).join("、")}`,
+      overwriteTargets.length > 0 ? "包含内容不同的目标目录，继续后旧目录会先移至系统回收站，再复制当前 Skill。" : "只会向缺失目标新增当前 Skill。"
+    ].join("\n");
+    const ok = window.confirm(`确认同步？\n\n${details}`);
+    if (!ok) return;
+    setSyncBusy(true);
+    try {
+      const nextSkills = await api.syncSkill(syncDraft.skill.id, syncDraft.selectedAgentIds);
+      setSkills(nextSkills);
+      if (selectedSkill?.id === syncDraft.skill.id) {
+        setSyncTargets(await api.getSyncTargets(syncDraft.skill.id));
+      }
+      setError(`已同步到 ${selectedTargets.map((target) => target.agentName).join("、")}。`);
+      setSyncDraft(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSyncBusy(false);
+    }
+  }
+
+  async function updateSelectedSkillTags(tags: Tag[]) {
+    if (!selectedSkill) return;
+    try {
+      const updated = await api.setSkillTags(selectedSkill.id, tags);
+      setSelectedSkill(updated);
+      setSkills((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
   async function updateSettings(next: Settings) {
     const customAgentsChanged = JSON.stringify(settings.customAgents) !== JSON.stringify(next.customAgents);
     setSettings(next);
@@ -244,6 +333,7 @@ export default function App() {
   }
 
   const themeClass = settings.theme === "light" ? "theme-light" : settings.theme === "system" ? "theme-system" : "theme-dark";
+  const activeSyncTargets = syncDraft?.targets.filter((target) => target.status !== "same") ?? [];
 
   return (
     <div className={`app-shell ${themeClass}`}>
@@ -350,8 +440,21 @@ export default function App() {
                 <dt>版本</dt><dd>{selectedSkill.version || "-"}</dd>
                 <dt>来源</dt><dd>{selectedSkill.source}</dd>
                 <dt>路径</dt><dd title={selectedSkill.dirPath}>{selectedSkill.dirPath}</dd>
+                <dt>存在于</dt>
+                <dd>
+                  <AgentPresence
+                    agentIds={agentPresenceBySkillName.get(selectedSkill.name) ?? [selectedSkill.agentId]}
+                    agents={agents}
+                  />
+                </dd>
               </dl>
               <button className="wide-button" onClick={openSelectedInFileManager}><FolderOpen size={16} /> 在文件管理器中显示</button>
+              <h2>标签</h2>
+              <TagPicker
+                tags={builtinTags}
+                value={selectedSkill.tags}
+                onChange={updateSelectedSkillTags}
+              />
               <h2>同步到</h2>
               <div className="sync-list">
                 {syncTargets.map((target) => (
@@ -373,32 +476,148 @@ export default function App() {
               </div>
             ) : (
               visibleSkills.map((skill) => (
-                <article key={skill.id} className="skill-card" onDoubleClick={() => openSkill(skill)}>
-                  <div className="card-head">
-                    <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={() => toggleStar(skill)}><Star size={17} /></button>
-                    <span>{agentName(agents, skill.agentId)}</span>
-                  </div>
-                  <h2>{skill.displayName}</h2>
-                  <p>{skill.description || "未提供描述"}</p>
-                  <div className="tag-row">
-                    {skill.tags.map((tag) => <span key={tag.id} style={{ borderColor: tag.color }}>{tag.name}</span>)}
-                  </div>
-                  <footer>
-                    <span>v{skill.version || "0.0.0"}</span>
-                    <button onClick={() => openSkill(skill)}>编辑</button>
-                  </footer>
-                </article>
+                <SkillCard
+                  key={skill.id}
+                  skill={skill}
+                  agents={agents}
+                  agentIds={agentPresenceBySkillName.get(skill.name) ?? [skill.agentId]}
+                  onOpen={openSkill}
+                  onSync={openSyncPanel}
+                  onToggleStar={toggleStar}
+                />
               ))
             )}
           </section>
         )}
       </main>
 
+      {syncDraft && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !syncBusy && setSyncDraft(null)}>
+          <section className="sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <h2 id="sync-title">同步 {syncDraft.skill.displayName}</h2>
+                <p>{syncDraft.skill.dirPath}</p>
+              </div>
+              <button className="icon-button" onClick={() => setSyncDraft(null)} disabled={syncBusy}><X size={16} /></button>
+            </header>
+            <div className="sync-target-table">
+              {syncDraft.targets.length === 0 ? (
+                <p className="muted-copy">没有其他已启用 Agent。可在设置里启用或添加 Agent 目录。</p>
+              ) : (
+                syncDraft.targets.map((target) => (
+                  <label key={target.agentId} className={target.status === "same" ? "sync-target-row disabled" : "sync-target-row"}>
+                    <input
+                      type="checkbox"
+                      disabled={target.status === "same" || syncBusy}
+                      checked={syncDraft.selectedAgentIds.includes(target.agentId)}
+                      onChange={() => toggleSyncDraftTarget(target.agentId)}
+                    />
+                    <span>
+                      <strong>{target.agentName}</strong>
+                      <em title={target.targetPath}>{target.targetPath}</em>
+                    </span>
+                    <b className={`sync-badge ${target.status}`}>{statusLabel(target.status)}</b>
+                  </label>
+                ))
+              )}
+            </div>
+            <footer>
+              <span>{activeSyncTargets.length} 个可同步目标</span>
+              <button onClick={() => setSyncDraft(null)} disabled={syncBusy}>取消</button>
+              <button className="primary" onClick={confirmSyncDraft} disabled={syncBusy || syncDraft.selectedAgentIds.length === 0}>
+                {syncBusy ? "同步中" : `同步 ${syncDraft.selectedAgentIds.length} 个目标`}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
       <footer className="statusbar">
         <span>{agents.length} agents</span>
         <span>{skills.length} skills</span>
         <span>{saveStateText(saveState)}</span>
       </footer>
+    </div>
+  );
+}
+
+function SkillCard({
+  skill,
+  agents,
+  agentIds,
+  onOpen,
+  onSync,
+  onToggleStar
+}: {
+  skill: Skill;
+  agents: Agent[];
+  agentIds: string[];
+  onOpen: (skill: Skill) => void;
+  onSync: (skill: Skill) => void;
+  onToggleStar: (skill: Skill) => void;
+}) {
+  const canSync = agents.length > 1;
+  return (
+    <article className="skill-card" onDoubleClick={() => onOpen(skill)}>
+      <div className="card-head">
+        <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={() => onToggleStar(skill)} title="收藏">
+          <Star size={17} />
+        </button>
+        <span>{agentName(agents, skill.agentId)}</span>
+      </div>
+      <h2>{skill.displayName}</h2>
+      <p>{skill.description || "未提供描述"}</p>
+      <AgentPresence agentIds={agentIds} agents={agents} />
+      <div className="tag-row">
+        {skill.tags.map((tag) => <span key={tag.id} style={{ borderColor: tag.color }}>{tag.name}</span>)}
+      </div>
+      <footer>
+        <span>v{skill.version || "0.0.0"}</span>
+        <div className="card-actions">
+          {canSync && <button onClick={() => onSync(skill)}>同步</button>}
+          <button onClick={() => onOpen(skill)}>编辑</button>
+        </div>
+      </footer>
+    </article>
+  );
+}
+
+function AgentPresence({ agentIds, agents }: { agentIds: string[]; agents: Agent[] }) {
+  const visibleIds = agentIds.slice(0, 4);
+  const hiddenCount = Math.max(0, agentIds.length - visibleIds.length);
+  return (
+    <div className="agent-presence" title={agentIds.map((id) => agentName(agents, id)).join("、")}>
+      {visibleIds.map((id) => {
+        const name = agentName(agents, id);
+        return <span key={id}>{agentInitials(name)}</span>;
+      })}
+      {hiddenCount > 0 && <span>+{hiddenCount}</span>}
+    </div>
+  );
+}
+
+function TagPicker({ tags, value, onChange }: { tags: Tag[]; value: Tag[]; onChange: (tags: Tag[]) => void }) {
+  const selectedIds = new Set(value.map((tag) => tag.id));
+  return (
+    <div className="tag-picker">
+      {tags.map((tag) => {
+        const selected = selectedIds.has(tag.id);
+        return (
+          <button
+            key={tag.id}
+            className={selected ? "selected" : ""}
+            style={{ "--tag-color": tag.color } as CSSProperties}
+            onClick={() => {
+              const next = selected ? value.filter((item) => item.id !== tag.id) : [...value, tag];
+              onChange(next);
+            }}
+          >
+            <span className="tag-dot" style={{ background: tag.color }} />
+            {tag.name}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -465,7 +684,7 @@ function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (
         />
       </div>
       <div className="setting-row">
-        <div className="setting-copy"><ChevronsUpDown size={18} /><strong>全局快捷键</strong><span>Tauri 桌面端注册，默认 Ctrl+Shift+K。</span></div>
+        <div className="setting-copy"><ChevronsUpDown size={18} /><strong>全局快捷键</strong><span>macOS 默认 Cmd+Shift+K，Windows/Linux 默认 Ctrl+Shift+K。</span></div>
         <input value={settings.shortcut} onChange={(event) => onChange({ ...settings, shortcut: event.target.value })} />
       </div>
       <label className="toggle-row">
@@ -685,6 +904,16 @@ function navClass(active: boolean) {
 
 function agentName(agents: Agent[], agentId: string) {
   return agents.find((agent) => agent.id === agentId)?.name ?? "Unknown";
+}
+
+function agentInitials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
 }
 
 function statusLabel(status: SyncTargetStatus["status"]) {
