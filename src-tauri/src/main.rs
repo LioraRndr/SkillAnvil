@@ -1449,6 +1449,27 @@ fn create_snapshot_if_needed(
     if !settings.snapshots_enabled || content.trim().is_empty() {
         return Ok(());
     }
+    // PRD: only snapshot if non-whitespace character change > 5%
+    let last_content: Option<String> = conn
+        .query_row(
+            "select content from snapshots where skill_id = ?1 and file_path = ?2 order by created_at desc limit 1",
+            params![skill_id, relative_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(prev) = last_content {
+        let prev_chars: usize = prev.chars().filter(|c| !c.is_whitespace()).count();
+        let curr_chars: usize = content.chars().filter(|c| !c.is_whitespace()).count();
+        let max_len = prev_chars.max(curr_chars).max(1);
+        let diff = if curr_chars > prev_chars {
+            curr_chars - prev_chars
+        } else {
+            prev_chars - curr_chars
+        };
+        if (diff as f64 / max_len as f64) < 0.05 {
+            return Ok(());
+        }
+    }
     conn.execute(
         "insert into snapshots(id, skill_id, file_path, content, created_at) values(?1, ?2, ?3, ?4, ?5)",
         params![Uuid::new_v4().to_string(), skill_id, relative_path, content, now()],

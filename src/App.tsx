@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { CSSProperties } from "react";
 import { ink } from "ink-mde";
 import type { Instance } from "ink-mde";
@@ -8,26 +8,28 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsUpDown,
+  CloudDownload,
   Copy,
-  Diff,
   FileText,
   FolderOpen,
+  GitCompare,
   Grid2X2,
+  History,
   Languages,
   List,
   RefreshCcw,
+  RotateCcw,
   Save,
   Search,
   Settings as SettingsIcon,
   ShieldAlert,
   Sparkles,
   Star,
-  Tags,
   Trash2,
   X
 } from "lucide-react";
 import { api } from "./api";
-import type { Agent, ReadFileResult, ScanIssue, Settings, Skill, SkillFilter, SyncTargetStatus, Tag } from "./types";
+import type { Agent, GithubUpdate, ReadFileResult, ScanIssue, Settings, Skill, SkillFilter, Snapshot, SyncTargetStatus, Tag } from "./types";
 
 type ViewMode = "grid" | "list";
 type Pane = "skills" | "settings";
@@ -37,6 +39,16 @@ type SyncDraft = {
   skill: Skill;
   targets: SyncTargetStatus[];
   selectedAgentIds: string[];
+};
+type ContextMenu = {
+  x: number;
+  y: number;
+  skill: Skill;
+};
+type DiffView = {
+  snapshot: Snapshot;
+  currentContent: string;
+  snapshotContent: string;
 };
 
 const defaultSettings: Settings = {
@@ -71,6 +83,11 @@ export default function App() {
   const [scanIssues, setScanIssues] = useState<ScanIssue[]>([]);
   const [syncDraft, setSyncDraft] = useState<SyncDraft | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [githubUpdates, setGithubUpdates] = useState<Map<string, GithubUpdate>>(new Map());
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
+  const [diffView, setDiffView] = useState<DiffView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
 
@@ -145,12 +162,18 @@ export default function App() {
     setSelectedSkill(skill);
     setSelectedFile(relativePath);
     setError(null);
+    setDiffView(null);
     try {
-      const result = await api.readSkillFile(skill.id, relativePath);
+      const [result, targets, snaps] = await Promise.all([
+        api.readSkillFile(skill.id, relativePath),
+        api.getSyncTargets(skill.id),
+        api.getSnapshots(skill.id),
+      ]);
       setFileState(result);
       setEditorValue(result.content);
       setSaveState("saved");
-      setSyncTargets(await api.getSyncTargets(skill.id));
+      setSyncTargets(targets);
+      setSnapshots(snaps);
     } catch (err) {
       setError(errorMessage(err));
       setSaveState("error");
@@ -196,6 +219,32 @@ export default function App() {
       const created = await api.cloneSkill(selectedSkill.id, newName);
       setSkills(await api.getSkills({}));
       await openSkill(created);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function cloneSkillDirect(skill: Skill) {
+    const newName = window.prompt("输入克隆后的 Skill 名称", `${skill.name}-copy`);
+    if (!newName) return;
+    try {
+      await api.cloneSkill(skill.id, newName);
+      setSkills(await api.getSkills({}));
+      setError(`已克隆 ${skill.displayName}。`);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function trashSkillDirect(skill: Skill) {
+    const agent = agents.find((item) => item.id === skill.agentId);
+    const ok = window.confirm(`确认卸载 ${skill.displayName}？\n\n路径：${skill.dirPath}\n将移动到系统回收站。`);
+    if (!ok) return;
+    try {
+      await api.trashSkill(skill.id, [skill.agentId]);
+      setSkills(await api.getSkills({}));
+      if (selectedSkill?.id === skill.id) setSelectedSkill(null);
+      setError(agent ? `已从 ${agent.name} 移至回收站。` : "已移至回收站。");
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -319,6 +368,90 @@ export default function App() {
     }
   }
 
+  async function loadSnapshots(skillId: string) {
+    try {
+      const items = await api.getSnapshots(skillId);
+      setSnapshots(items);
+    } catch (err) {
+      setSnapshots([]);
+    }
+  }
+
+  async function restoreSnapshot(snapshotId: string) {
+    if (!selectedSkill) return;
+    const ok = window.confirm("确认回滚到该快照？当前文件内容将被覆盖。");
+    if (!ok) return;
+    try {
+      const result = await api.restoreSnapshot(snapshotId);
+      setFileState(result);
+      setEditorValue(result.content);
+      setSaveState("saved");
+      setSkills(await api.getSkills({}));
+      await loadSnapshots(selectedSkill.id);
+      setError("已回滚到选定快照。");
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function viewSnapshotDiff(snapshot: Snapshot) {
+    if (!selectedSkill) return;
+    try {
+      const current = await api.readSkillFile(selectedSkill.id, snapshot.filePath);
+      setDiffView({
+        snapshot,
+        currentContent: current.content,
+        snapshotContent: snapshot.content,
+      });
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function checkGithubUpdatesForSkills() {
+    const githubSkills = skills.filter((skill) => skill.source === "github");
+    if (githubSkills.length === 0) {
+      setError("没有 GitHub 来源的 Skill。");
+      return;
+    }
+    setCheckingUpdates(true);
+    try {
+      const updates = await api.checkGithubUpdates(githubSkills.map((skill) => skill.id));
+      const map = new Map<string, GithubUpdate>();
+      for (const update of updates) {
+        map.set(update.skillId, update);
+      }
+      setGithubUpdates(map);
+      const hasUpdates = updates.filter((update) => update.hasUpdate);
+      setError(hasUpdates.length > 0 ? `发现 ${hasUpdates.length} 个 Skill 有更新。` : "所有 GitHub 来源 Skill 均为最新。");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
+
+  const handleContextMenu = useCallback((event: React.MouseEvent, skill: Skill) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({ x: event.clientX, y: event.clientY, skill });
+  }, []);
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = () => closeContextMenu();
+    window.addEventListener("click", handler);
+    window.addEventListener("contextmenu", handler);
+    return () => {
+      window.removeEventListener("click", handler);
+      window.removeEventListener("contextmenu", handler);
+    };
+  }, [contextMenu, closeContextMenu]);
+
   async function updateSettings(next: Settings) {
     const customAgentsChanged = JSON.stringify(settings.customAgents) !== JSON.stringify(next.customAgents);
     setSettings(next);
@@ -397,9 +530,14 @@ export default function App() {
             </div>
           )}
           {!selectedSkill && pane === "skills" && (
-            <div className="segmented">
-              <button className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")} title="网格"><Grid2X2 size={16} /></button>
-              <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="列表"><List size={16} /></button>
+            <div className="topbar-actions">
+              <button className="ghost-button" onClick={checkGithubUpdatesForSkills} disabled={checkingUpdates}>
+                <CloudDownload size={15} /> {checkingUpdates ? "检查中..." : "检查更新"}
+              </button>
+              <div className="segmented">
+                <button className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")} title="网格"><Grid2X2 size={16} /></button>
+                <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="列表"><List size={16} /></button>
+              </div>
             </div>
           )}
           {selectedSkill && (
@@ -425,7 +563,7 @@ export default function App() {
         ) : selectedSkill ? (
           <section className="editor-layout">
             <div className="editor-card">
-              <MarkdownEditor value={editorValue} onChange={changeEditor} />
+              <MarkdownEditor value={editorValue} onChange={changeEditor} theme={settings.theme} />
             </div>
             <aside className="inspector">
               <h2>文件树</h2>
@@ -464,6 +602,25 @@ export default function App() {
                   </button>
                 ))}
               </div>
+              <h2><History size={13} /> 版本历史</h2>
+              <div className="snapshot-list">
+                {snapshots.length === 0 ? (
+                  <p className="muted-copy">暂无快照。保存时自动创建。</p>
+                ) : (
+                  snapshots.slice(0, 10).map((snap) => (
+                    <div key={snap.id} className="snapshot-row">
+                      <div className="snapshot-info">
+                        <span className="snapshot-time">{formatSnapshotTime(snap.createdAt)}</span>
+                        <span className="snapshot-file">{snap.filePath}</span>
+                      </div>
+                      <div className="snapshot-actions">
+                        <button title="查看 diff" onClick={() => viewSnapshotDiff(snap)}><GitCompare size={13} /></button>
+                        <button title="回滚到此版本" onClick={() => restoreSnapshot(snap.id)}><RotateCcw size={13} /></button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </aside>
           </section>
         ) : (
@@ -481,9 +638,11 @@ export default function App() {
                   skill={skill}
                   agents={agents}
                   agentIds={agentPresenceBySkillName.get(skill.name) ?? [skill.agentId]}
+                  update={githubUpdates.get(skill.id)}
                   onOpen={openSkill}
                   onSync={openSyncPanel}
                   onToggleStar={toggleStar}
+                  onContextMenu={handleContextMenu}
                 />
               ))
             )}
@@ -533,6 +692,62 @@ export default function App() {
         </div>
       )}
 
+      {diffView && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setDiffView(null)}>
+          <section className="diff-modal" role="dialog" aria-modal="true" aria-labelledby="diff-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <h2 id="diff-title">版本对比</h2>
+                <p>{formatSnapshotTime(diffView.snapshot.createdAt)} — {diffView.snapshot.filePath}</p>
+              </div>
+              <button className="icon-button" onClick={() => setDiffView(null)}><X size={16} /></button>
+            </header>
+            <div className="diff-content">
+              <div className="diff-pane">
+                <h3>快照版本</h3>
+                <pre>{diffView.snapshotContent}</pre>
+              </div>
+              <div className="diff-pane">
+                <h3>当前版本</h3>
+                <pre>{diffView.currentContent}</pre>
+              </div>
+            </div>
+            <footer>
+              <button onClick={() => setDiffView(null)}>关闭</button>
+              <button className="primary" onClick={() => { void restoreSnapshot(diffView.snapshot.id); setDiffView(null); }}>
+                <RotateCcw size={14} /> 回滚到快照版本
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {contextMenu && (
+        <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(e) => e.stopPropagation()}>
+          <button onClick={() => { openSkill(contextMenu.skill); closeContextMenu(); }}>
+            <FileText size={14} /> 编辑
+          </button>
+          {agents.length > 1 && (
+            <button onClick={() => { openSyncPanel(contextMenu.skill); closeContextMenu(); }}>
+              <RefreshCcw size={14} /> 同步到...
+            </button>
+          )}
+          <button onClick={() => { toggleStar(contextMenu.skill); closeContextMenu(); }}>
+            <Star size={14} /> {contextMenu.skill.starred ? "取消收藏" : "收藏"}
+          </button>
+          <button onClick={() => { void cloneSkillDirect(contextMenu.skill); closeContextMenu(); }}>
+            <Copy size={14} /> 克隆
+          </button>
+          <button onClick={() => { void trashSkillDirect(contextMenu.skill); closeContextMenu(); }} className="danger">
+            <Trash2 size={14} /> 卸载
+          </button>
+          <div className="context-separator" />
+          <button onClick={() => { void api.openInFileManager(contextMenu.skill.dirPath); closeContextMenu(); }}>
+            <FolderOpen size={14} /> 在文件管理器中显示
+          </button>
+        </div>
+      )}
+
       <footer className="statusbar">
         <span>{agents.length} agents</span>
         <span>{skills.length} skills</span>
@@ -546,20 +761,29 @@ function SkillCard({
   skill,
   agents,
   agentIds,
+  update,
   onOpen,
   onSync,
-  onToggleStar
+  onToggleStar,
+  onContextMenu
 }: {
   skill: Skill;
   agents: Agent[];
   agentIds: string[];
+  update?: GithubUpdate;
   onOpen: (skill: Skill) => void;
   onSync: (skill: Skill) => void;
   onToggleStar: (skill: Skill) => void;
+  onContextMenu: (event: React.MouseEvent, skill: Skill) => void;
 }) {
   const canSync = agents.length > 1;
   return (
-    <article className="skill-card" onDoubleClick={() => onOpen(skill)}>
+    <article className="skill-card" onDoubleClick={() => onOpen(skill)} onContextMenu={(e) => onContextMenu(e, skill)}>
+      {update?.hasUpdate && (
+        <div className="update-badge" title={`有更新：${update.summary.join(", ")}`}>
+          <CloudDownload size={13} /> 更新可用
+        </div>
+      )}
       <div className="card-head">
         <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={() => onToggleStar(skill)} title="收藏">
           <Star size={17} />
@@ -846,11 +1070,12 @@ function buildFileTree(files: Skill["files"]): FileTreeNode[] {
   return sortTree(root.children);
 }
 
-function MarkdownEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function MarkdownEditor({ value, onChange, theme }: { value: string; onChange: (value: string) => void; theme: string }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<Instance | null>(null);
   const lastValueRef = useRef(value);
   const mountRunRef = useRef(0);
+  const appearance = theme === "light" ? "light" : "dark";
 
   useEffect(() => {
     let disposed = false;
@@ -861,7 +1086,7 @@ function MarkdownEditor({ value, onChange }: { value: string; onChange: (value: 
       const instance = await ink(hostRef.current, {
         doc: value,
         interface: {
-          appearance: "dark",
+          appearance,
           toolbar: true
         },
         hooks: {
@@ -886,7 +1111,7 @@ function MarkdownEditor({ value, onChange }: { value: string; onChange: (value: 
         hostRef.current?.replaceChildren();
       }
     };
-  }, []);
+  }, [appearance]);
 
   useEffect(() => {
     if (editorRef.current && value !== lastValueRef.current) {
@@ -927,4 +1152,22 @@ function saveStateText(state: SaveState) {
 function errorMessage(err: unknown) {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function formatSnapshotTime(isoString: string): string {
+  try {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return "刚刚";
+    if (diffMin < 60) return `${diffMin} 分钟前`;
+    const diffHours = Math.floor(diffMin / 60);
+    if (diffHours < 24) return `${diffHours} 小时前`;
+    const diffDays = Math.floor(diffHours / 24);
+    if (diffDays < 7) return `${diffDays} 天前`;
+    return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return isoString;
+  }
 }
