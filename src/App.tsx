@@ -361,11 +361,16 @@ export default function App() {
     try {
       const nextSkills = await api.syncSkill(activeTab.skill.id, [target.agentId]);
       setSkills(nextSkills);
-      const newTargets = await api.getSyncTargets(activeTab.skill.id);
-      updateActiveTab({ syncTargets: newTargets });
+      // Find the same skill in the refreshed list to update the tab
+      const refreshed = nextSkills.find((s) => s.name === activeTab.skill.name && s.agentId === activeTab.skill.agentId);
+      if (refreshed) {
+        updateActiveTab({ skill: refreshed });
+        const newTargets = await api.getSyncTargets(refreshed.id);
+        updateActiveTab({ syncTargets: newTargets });
+      }
       setError(`已同步到 ${target.agentName}。`);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(`同步失败：${errorMessage(err)}`);
     }
   }
 
@@ -417,14 +422,19 @@ export default function App() {
     try {
       const nextSkills = await api.syncSkill(syncDraft.skill.id, syncDraft.selectedAgentIds);
       setSkills(nextSkills);
-      if (activeTab?.skill.id === syncDraft.skill.id) {
-        const newTargets = await api.getSyncTargets(syncDraft.skill.id);
-        updateActiveTab({ syncTargets: newTargets });
+      // Refresh sync targets for the active tab using name-based matching
+      if (activeTab) {
+        const refreshed = nextSkills.find((s) => s.name === activeTab.skill.name && s.agentId === activeTab.skill.agentId);
+        if (refreshed) {
+          updateActiveTab({ skill: refreshed });
+          const newTargets = await api.getSyncTargets(refreshed.id);
+          updateActiveTab({ syncTargets: newTargets });
+        }
       }
       setError(`已同步到 ${selectedTargets.map((target) => target.agentName).join("、")}。`);
       setSyncDraft(null);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(`同步失败：${errorMessage(err)}`);
     } finally {
       setSyncBusy(false);
     }
@@ -697,12 +707,26 @@ export default function App() {
               />
               <h2>同步到</h2>
               <div className="sync-list">
-                {activeTab.syncTargets.map((target) => (
-                  <button key={target.agentId} disabled={target.status === "same"} title={target.targetPath} onClick={() => syncSelected(target)}>
-                    <span>{target.agentName}</span>
-                    <em>{statusLabel(target.status)}</em>
-                  </button>
-                ))}
+                {activeTab.syncTargets.length === 0 ? (
+                  <p className="muted-copy">没有其他已启用的 Agent。可在设置中启用更多 Agent。</p>
+                ) : activeTab.syncTargets.every((t) => t.status === "same") ? (
+                  <>
+                    {activeTab.syncTargets.map((target) => (
+                      <button key={target.agentId} disabled title={target.targetPath}>
+                        <span>{target.agentName}</span>
+                        <em>{statusLabel(target.status)}</em>
+                      </button>
+                    ))}
+                    <p className="muted-copy">所有目标均已同步，无需操作。</p>
+                  </>
+                ) : (
+                  activeTab.syncTargets.map((target) => (
+                    <button key={target.agentId} disabled={target.status === "same"} title={target.targetPath} onClick={() => syncSelected(target)}>
+                      <span>{target.agentName}</span>
+                      <em>{statusLabel(target.status)}</em>
+                    </button>
+                  ))
+                )}
               </div>
               <h2><History size={13} /> 版本历史</h2>
               <div className="snapshot-list">
@@ -765,6 +789,8 @@ export default function App() {
             <div className="sync-target-table">
               {syncDraft.targets.length === 0 ? (
                 <p className="muted-copy">没有其他已启用 Agent。可在设置里启用或添加 Agent 目录。</p>
+              ) : syncDraft.targets.every((t) => t.status === "same") ? (
+                <p className="muted-copy">该 Skill 已存在于所有已启用的 Agent 中，且内容一致，无需同步。</p>
               ) : (
                 syncDraft.targets.map((target) => (
                   <label key={target.agentId} className={target.status === "same" ? "sync-target-row disabled" : "sync-target-row"}>
