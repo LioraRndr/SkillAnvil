@@ -50,6 +50,15 @@ type DiffView = {
   currentContent: string;
   snapshotContent: string;
 };
+type Tab = {
+  skill: Skill;
+  selectedFile: string;
+  fileState: ReadFileResult | null;
+  editorValue: string;
+  saveState: SaveState;
+  syncTargets: SyncTargetStatus[];
+  snapshots: Snapshot[];
+};
 
 const defaultSettings: Settings = {
   language: "zh-CN",
@@ -73,23 +82,22 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [pane, setPane] = useState<Pane>("skills");
-  const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
-  const [selectedFile, setSelectedFile] = useState("SKILL.md");
-  const [fileState, setFileState] = useState<ReadFileResult | null>(null);
-  const [editorValue, setEditorValue] = useState("");
-  const [saveState, setSaveState] = useState<SaveState>("idle");
-  const [syncTargets, setSyncTargets] = useState<SyncTargetStatus[]>([]);
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeTabIndex, setActiveTabIndex] = useState(-1);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [scanIssues, setScanIssues] = useState<ScanIssue[]>([]);
   const [syncDraft, setSyncDraft] = useState<SyncDraft | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [githubUpdates, setGithubUpdates] = useState<Map<string, GithubUpdate>>(new Map());
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [diffView, setDiffView] = useState<DiffView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
+  const saveTimerTabId = useRef<string | null>(null);
+
+  const activeTab = activeTabIndex >= 0 && activeTabIndex < tabs.length ? tabs[activeTabIndex] : null;
+  const selectedSkill = activeTab?.skill ?? null;
 
   const visibleSkills = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -103,14 +111,12 @@ export default function App() {
         .toLowerCase()
         .includes(q);
     });
-    // Deduplicate by skill name: keep one representative per unique name
     const seen = new Map<string, Skill>();
     for (const skill of filtered) {
       const existing = seen.get(skill.name);
       if (!existing) {
         seen.set(skill.name, skill);
       } else if (filter.agentId && skill.agentId === filter.agentId) {
-        // Prefer the one matching the current agent filter
         seen.set(skill.name, skill);
       }
     }
@@ -133,17 +139,18 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && selectedSkill) {
-        setSelectedSkill(null);
-      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void saveNow();
       }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "w") {
+        event.preventDefault();
+        if (activeTab) closeTab(activeTabIndex);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedSkill, editorValue, fileState, selectedFile]);
+  }, [activeTabIndex, activeTab]);
 
   async function boot() {
     setError(null);
@@ -170,15 +177,25 @@ export default function App() {
     }
   }
 
+  function tabId(skill: Skill, file: string) {
+    return `${skill.id}::${file}`;
+  }
+
   async function openSkill(skill: Skill, relativePath = "SKILL.md") {
-    // If multiple agents have this skill, prefer the one matching the current agent filter
     let target = skill;
     if (filter.agentId && skill.agentId !== filter.agentId) {
       const match = skills.find((s) => s.name === skill.name && s.agentId === filter.agentId);
       if (match) target = match;
     }
-    setSelectedSkill(target);
-    setSelectedFile(relativePath);
+
+    // Check if this skill+file is already open in a tab
+    const existingIndex = tabs.findIndex((t) => t.skill.id === target.id && t.selectedFile === relativePath);
+    if (existingIndex >= 0) {
+      setActiveTabIndex(existingIndex);
+      setPane("skills");
+      return;
+    }
+
     setError(null);
     setDiffView(null);
     try {
@@ -187,35 +204,62 @@ export default function App() {
         api.getSyncTargets(target.id),
         api.getSnapshots(target.id),
       ]);
-      setFileState(result);
-      setEditorValue(result.content);
-      setSaveState("saved");
-      setSyncTargets(targets);
-      setSnapshots(snaps);
+      const newTab: Tab = {
+        skill: target,
+        selectedFile: relativePath,
+        fileState: result,
+        editorValue: result.content,
+        saveState: "saved",
+        syncTargets: targets,
+        snapshots: snaps,
+      };
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabIndex(tabs.length);
+      setPane("skills");
     } catch (err) {
       setError(errorMessage(err));
-      setSaveState("error");
     }
   }
 
+  function closeTab(index: number) {
+    setTabs((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      // Adjust active index
+      if (next.length === 0) {
+        setActiveTabIndex(-1);
+      } else if (index < activeTabIndex) {
+        setActiveTabIndex(activeTabIndex - 1);
+      } else if (index === activeTabIndex) {
+        setActiveTabIndex(Math.min(index, next.length - 1));
+      }
+      return next;
+    });
+  }
+
+  function updateActiveTab(patch: Partial<Tab>) {
+    setTabs((prev) => prev.map((tab, i) => (i === activeTabIndex ? { ...tab, ...patch } : tab)));
+  }
+
   function changeEditor(value: string) {
-    setEditorValue(value);
-    setSaveState("dirty");
+    updateActiveTab({ editorValue: value, saveState: "dirty" });
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
+    const currentTabId = activeTab ? tabId(activeTab.skill, activeTab.selectedFile) : null;
+    saveTimerTabId.current = currentTabId;
     saveTimer.current = window.setTimeout(() => void saveNow(value), 1000);
   }
 
-  async function saveNow(nextValue = editorValue) {
-    if (!selectedSkill || !fileState) return;
-    setSaveState("saving");
+  async function saveNow(nextValue?: string) {
+    const tab = activeTab;
+    if (!tab || !tab.fileState) return;
+    const value = nextValue ?? tab.editorValue;
+    setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, saveState: "saving" as SaveState } : t)));
     try {
-      const result = await api.saveSkillFile(selectedSkill.id, selectedFile, nextValue, fileState.encoding);
-      setFileState(result);
-      setSaveState("saved");
+      const result = await api.saveSkillFile(tab.skill.id, tab.selectedFile, value, tab.fileState.encoding);
+      setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, fileState: result, saveState: "saved" as SaveState } : t)));
       setSkills(await api.getSkills({}));
     } catch (err) {
       setError(errorMessage(err));
-      setSaveState("error");
+      setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, saveState: "error" as SaveState } : t)));
     }
   }
 
@@ -223,18 +267,19 @@ export default function App() {
     try {
       const updated = await api.starSkill(skill.id, !skill.starred);
       setSkills((items) => items.map((item) => (item.id === updated.id ? updated : item)));
-      if (selectedSkill?.id === updated.id) setSelectedSkill(updated);
+      // Update skill in any open tabs
+      setTabs((prev) => prev.map((t) => (t.skill.id === updated.id ? { ...t, skill: updated } : t)));
     } catch (err) {
       setError(errorMessage(err));
     }
   }
 
   async function cloneSelected() {
-    if (!selectedSkill) return;
-    const newName = window.prompt("输入克隆后的 Skill 名称", `${selectedSkill.name}-copy`);
+    if (!activeTab) return;
+    const newName = window.prompt("输入克隆后的 Skill 名称", `${activeTab.skill.name}-copy`);
     if (!newName) return;
     try {
-      const created = await api.cloneSkill(selectedSkill.id, newName);
+      const created = await api.cloneSkill(activeTab.skill.id, newName);
       setSkills(await api.getSkills({}));
       await openSkill(created);
     } catch (err) {
@@ -261,7 +306,14 @@ export default function App() {
     try {
       await api.trashSkill(skill.id, [skill.agentId]);
       setSkills(await api.getSkills({}));
-      if (selectedSkill?.id === skill.id) setSelectedSkill(null);
+      // Close any tabs for this skill
+      setTabs((prev) => {
+        const next = prev.filter((t) => t.skill.id !== skill.id);
+        if (next.length < prev.length) {
+          setActiveTabIndex(Math.min(activeTabIndex, next.length - 1));
+        }
+        return next;
+      });
       setError(agent ? `已从 ${agent.name} 移至回收站。` : "已移至回收站。");
     } catch (err) {
       setError(errorMessage(err));
@@ -269,22 +321,22 @@ export default function App() {
   }
 
   async function openSelectedInFileManager() {
-    if (!selectedSkill) return;
+    if (!activeTab) return;
     try {
-      await api.openInFileManager(selectedSkill.dirPath);
+      await api.openInFileManager(activeTab.skill.dirPath);
     } catch (err) {
       setError(errorMessage(err));
     }
   }
 
   async function trashSelected() {
-    if (!selectedSkill) return;
-    const agent = agents.find((item) => item.id === selectedSkill.agentId);
-    const ok = window.confirm(`确认卸载 ${selectedSkill.displayName}？\n\n路径：${selectedSkill.dirPath}\n将移动到系统回收站。`);
+    if (!activeTab) return;
+    const agent = agents.find((item) => item.id === activeTab.skill.agentId);
+    const ok = window.confirm(`确认卸载 ${activeTab.skill.displayName}？\n\n路径：${activeTab.skill.dirPath}\n将移动到系统回收站。`);
     if (!ok) return;
     try {
-      await api.trashSkill(selectedSkill.id, [selectedSkill.agentId]);
-      setSelectedSkill(null);
+      await api.trashSkill(activeTab.skill.id, [activeTab.skill.agentId]);
+      closeTab(activeTabIndex);
       setSkills(await api.getSkills({}));
       setError(agent ? `已从 ${agent.name} 移至回收站。` : "已移至回收站。");
     } catch (err) {
@@ -293,22 +345,23 @@ export default function App() {
   }
 
   async function syncSelected(target: SyncTargetStatus) {
-    if (!selectedSkill) return;
+    if (!activeTab) return;
     if (target.status === "same") return;
     const action = target.status === "missing" ? "新增" : "覆盖";
     const details = [
       `目标 Agent：${target.agentName}`,
       `状态：${statusLabel(target.status)}`,
-      `源路径：${selectedSkill.dirPath}`,
+      `源路径：${activeTab.skill.dirPath}`,
       `目标路径：${target.targetPath}`,
       target.status === "different" ? "目标目录内容不同，继续后旧目录会先移至系统回收站，再复制当前 Skill。" : "目标 Agent 下不存在该 Skill，继续后会复制当前 Skill。"
     ].join("\n");
-    const ok = window.confirm(`确认${action} ${selectedSkill.displayName}？\n\n${details}`);
+    const ok = window.confirm(`确认${action} ${activeTab.skill.displayName}？\n\n${details}`);
     if (!ok) return;
     try {
-      const nextSkills = await api.syncSkill(selectedSkill.id, [target.agentId]);
+      const nextSkills = await api.syncSkill(activeTab.skill.id, [target.agentId]);
       setSkills(nextSkills);
-      setSyncTargets(await api.getSyncTargets(selectedSkill.id));
+      const newTargets = await api.getSyncTargets(activeTab.skill.id);
+      updateActiveTab({ syncTargets: newTargets });
       setError(`已同步到 ${target.agentName}。`);
     } catch (err) {
       setError(errorMessage(err));
@@ -363,8 +416,9 @@ export default function App() {
     try {
       const nextSkills = await api.syncSkill(syncDraft.skill.id, syncDraft.selectedAgentIds);
       setSkills(nextSkills);
-      if (selectedSkill?.id === syncDraft.skill.id) {
-        setSyncTargets(await api.getSyncTargets(syncDraft.skill.id));
+      if (activeTab?.skill.id === syncDraft.skill.id) {
+        const newTargets = await api.getSyncTargets(syncDraft.skill.id);
+        updateActiveTab({ syncTargets: newTargets });
       }
       setError(`已同步到 ${selectedTargets.map((target) => target.agentName).join("、")}。`);
       setSyncDraft(null);
@@ -376,36 +430,29 @@ export default function App() {
   }
 
   async function updateSelectedSkillTags(tags: Tag[]) {
-    if (!selectedSkill) return;
+    if (!activeTab) return;
     try {
-      const updated = await api.setSkillTags(selectedSkill.id, tags);
-      setSelectedSkill(updated);
+      const updated = await api.setSkillTags(activeTab.skill.id, tags);
+      setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, skill: updated } : t)));
       setSkills((items) => items.map((item) => (item.id === updated.id ? updated : item)));
     } catch (err) {
       setError(errorMessage(err));
     }
   }
 
-  async function loadSnapshots(skillId: string) {
-    try {
-      const items = await api.getSnapshots(skillId);
-      setSnapshots(items);
-    } catch (err) {
-      setSnapshots([]);
-    }
-  }
-
   async function restoreSnapshot(snapshotId: string) {
-    if (!selectedSkill) return;
+    if (!activeTab) return;
     const ok = window.confirm("确认回滚到该快照？当前文件内容将被覆盖。");
     if (!ok) return;
     try {
       const result = await api.restoreSnapshot(snapshotId);
-      setFileState(result);
-      setEditorValue(result.content);
-      setSaveState("saved");
+      const snaps = await api.getSnapshots(activeTab.skill.id);
+      setTabs((prev) => prev.map((t, i) =>
+        i === activeTabIndex
+          ? { ...t, fileState: result, editorValue: result.content, saveState: "saved" as SaveState, snapshots: snaps }
+          : t
+      ));
       setSkills(await api.getSkills({}));
-      await loadSnapshots(selectedSkill.id);
       setError("已回滚到选定快照。");
     } catch (err) {
       setError(errorMessage(err));
@@ -413,9 +460,9 @@ export default function App() {
   }
 
   async function viewSnapshotDiff(snapshot: Snapshot) {
-    if (!selectedSkill) return;
+    if (!activeTab) return;
     try {
-      const current = await api.readSkillFile(selectedSkill.id, snapshot.filePath);
+      const current = await api.readSkillFile(activeTab.skill.id, snapshot.filePath);
       setDiffView({
         snapshot,
         currentContent: current.content,
@@ -483,6 +530,10 @@ export default function App() {
     }
   }
 
+  function switchTab(index: number) {
+    setActiveTabIndex(index);
+  }
+
   const themeClass = settings.theme === "light" ? "theme-light" : settings.theme === "system" ? "theme-system" : "theme-dark";
   const activeSyncTargets = syncDraft?.targets.filter((target) => target.status !== "same") ?? [];
 
@@ -536,18 +587,41 @@ export default function App() {
       </aside>
 
       <main className="main">
+        {tabs.length > 0 && (
+          <div className="tab-bar">
+            {tabs.map((tab, index) => (
+              <button
+                key={`${tab.skill.id}-${tab.selectedFile}`}
+                className={index === activeTabIndex ? "tab active" : "tab"}
+                onClick={() => switchTab(index)}
+                title={`${tab.skill.displayName} — ${tab.selectedFile}`}
+              >
+                <span className="tab-label">{tab.skill.displayName}</span>
+                {tab.saveState === "dirty" && <span className="tab-dot" />}
+                <span
+                  className="tab-close"
+                  onClick={(e) => { e.stopPropagation(); closeTab(index); }}
+                  title="关闭标签页"
+                >
+                  <X size={12} />
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <header className="topbar">
           <div>
-            <h1>{selectedSkill ? selectedSkill.displayName : pane === "settings" ? "设置" : "Skill 总览"}</h1>
-            <p>{selectedSkill ? `${agentName(agents, selectedSkill.agentId)} > ${selectedFile}` : "扫描、编辑和同步本地 Coding Agent Skills"}</p>
+            <h1>{activeTab ? activeTab.skill.displayName : pane === "settings" ? "设置" : "Skill 总览"}</h1>
+            <p>{activeTab ? `${agentName(agents, activeTab.skill.agentId)} > ${activeTab.selectedFile}` : "扫描、编辑和同步本地 Coding Agent Skills"}</p>
           </div>
-          {!selectedSkill && pane === "skills" && (
+          {!activeTab && pane === "skills" && (
             <div className="topbar-stats">
               <span>{agents.length} Agents</span>
               <span>{new Set(skills.map((skill) => skill.name)).size} Skills</span>
             </div>
           )}
-          {!selectedSkill && pane === "skills" && (
+          {!activeTab && pane === "skills" && (
             <div className="topbar-actions">
               <button className="ghost-button" onClick={checkGithubUpdatesForSkills} disabled={checkingUpdates}>
                 <CloudDownload size={15} /> {checkingUpdates ? "检查中..." : "检查更新"}
@@ -558,12 +632,11 @@ export default function App() {
               </div>
             </div>
           )}
-          {selectedSkill && (
+          {activeTab && (
             <div className="editor-actions">
               <button onClick={() => void saveNow()}><Save size={16} /> 保存</button>
               <button onClick={cloneSelected}><Copy size={16} /> 克隆</button>
               <button onClick={trashSelected} className="danger"><Trash2 size={16} /> 卸载</button>
-              <button onClick={() => setSelectedSkill(null)}><X size={16} /></button>
             </div>
           )}
         </header>
@@ -576,30 +649,35 @@ export default function App() {
           </div>
         )}
 
-        {pane === "settings" && !selectedSkill ? (
+        {pane === "settings" && !activeTab ? (
           <SettingsPanel settings={settings} onChange={updateSettings} />
-        ) : selectedSkill ? (
+        ) : activeTab ? (
           <section className="editor-layout">
             <div className="editor-card">
-              <MarkdownEditor value={editorValue} onChange={changeEditor} theme={settings.theme} />
+              <MarkdownEditor
+                key={`${activeTab.skill.id}-${activeTab.selectedFile}`}
+                value={activeTab.editorValue}
+                onChange={changeEditor}
+                theme={settings.theme}
+              />
             </div>
             <aside className="inspector">
               <h2>文件树</h2>
               <FileTree
-                files={selectedSkill.files}
-                selectedFile={selectedFile}
-                onOpen={(relativePath) => openSkill(selectedSkill, relativePath)}
+                files={activeTab.skill.files}
+                selectedFile={activeTab.selectedFile}
+                onOpen={(relativePath) => openSkill(activeTab.skill, relativePath)}
               />
               <h2>元信息</h2>
               <dl className="meta">
-                <dt>编码</dt><dd>{fileState?.encoding ?? "-"}</dd>
-                <dt>版本</dt><dd>{selectedSkill.version || "-"}</dd>
-                <dt>来源</dt><dd>{selectedSkill.source}</dd>
-                <dt>路径</dt><dd title={selectedSkill.dirPath}>{selectedSkill.dirPath}</dd>
+                <dt>编码</dt><dd>{activeTab.fileState?.encoding ?? "-"}</dd>
+                <dt>版本</dt><dd>{activeTab.skill.version || "-"}</dd>
+                <dt>来源</dt><dd>{activeTab.skill.source}</dd>
+                <dt>路径</dt><dd title={activeTab.skill.dirPath}>{activeTab.skill.dirPath}</dd>
                 <dt>存在于</dt>
                 <dd>
                   <AgentPresence
-                    agentIds={agentPresenceBySkillName.get(selectedSkill.name) ?? [selectedSkill.agentId]}
+                    agentIds={agentPresenceBySkillName.get(activeTab.skill.name) ?? [activeTab.skill.agentId]}
                     agents={agents}
                   />
                 </dd>
@@ -608,12 +686,12 @@ export default function App() {
               <h2>标签</h2>
               <TagPicker
                 tags={builtinTags}
-                value={selectedSkill.tags}
+                value={activeTab.skill.tags}
                 onChange={updateSelectedSkillTags}
               />
               <h2>同步到</h2>
               <div className="sync-list">
-                {syncTargets.map((target) => (
+                {activeTab.syncTargets.map((target) => (
                   <button key={target.agentId} disabled={target.status === "same"} title={target.targetPath} onClick={() => syncSelected(target)}>
                     <span>{target.agentName}</span>
                     <em>{statusLabel(target.status)}</em>
@@ -622,10 +700,10 @@ export default function App() {
               </div>
               <h2><History size={13} /> 版本历史</h2>
               <div className="snapshot-list">
-                {snapshots.length === 0 ? (
+                {activeTab.snapshots.length === 0 ? (
                   <p className="muted-copy">暂无快照。保存时自动创建。</p>
                 ) : (
-                  snapshots.slice(0, 10).map((snap) => (
+                  activeTab.snapshots.slice(0, 10).map((snap) => (
                     <div key={snap.id} className="snapshot-row">
                       <div className="snapshot-info">
                         <span className="snapshot-time">{formatSnapshotTime(snap.createdAt)}</span>
@@ -633,7 +711,7 @@ export default function App() {
                       </div>
                       <div className="snapshot-actions">
                         <button title="查看 diff" onClick={() => viewSnapshotDiff(snap)}><GitCompare size={13} /></button>
-                        <button title="回滚到此版本" onClick={() => restoreSnapshot(snap.id)}><RotateCcw size={13} /></button>
+                        <button title="回滚到此版本" onClick={() => void restoreSnapshot(snap.id)}><RotateCcw size={13} /></button>
                       </div>
                     </div>
                   ))
@@ -647,7 +725,7 @@ export default function App() {
               <div className="empty-state">
                 <Sparkles size={28} />
                 <h2>没有发现 Skill</h2>
-                <p>点击左下角“扫描”，或在设置中添加自定义 Agent Skill 目录。</p>
+                <p>点击左下角"扫描"，或在设置中添加自定义 Agent Skill 目录。</p>
               </div>
             ) : (
               visibleSkills.map((skill) => (
@@ -769,7 +847,7 @@ export default function App() {
       <footer className="statusbar">
         <span>{agents.length} agents</span>
         <span>{new Set(skills.map((skill) => skill.name)).size} skills</span>
-        <span>{saveStateText(saveState)}</span>
+        {activeTab && <span>{saveStateText(activeTab.saveState)}</span>}
       </footer>
     </div>
   );
