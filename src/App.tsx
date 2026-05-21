@@ -93,7 +93,7 @@ export default function App() {
 
   const visibleSkills = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return skills.filter((skill) => {
+    const filtered = skills.filter((skill) => {
       if (filter.agentId && skill.agentId !== filter.agentId) return false;
       if (filter.starred && !skill.starred) return false;
       if (filter.tagId && !skill.tags.some((tag) => tag.id === filter.tagId)) return false;
@@ -103,6 +103,18 @@ export default function App() {
         .toLowerCase()
         .includes(q);
     });
+    // Deduplicate by skill name: keep one representative per unique name
+    const seen = new Map<string, Skill>();
+    for (const skill of filtered) {
+      const existing = seen.get(skill.name);
+      if (!existing) {
+        seen.set(skill.name, skill);
+      } else if (filter.agentId && skill.agentId === filter.agentId) {
+        // Prefer the one matching the current agent filter
+        seen.set(skill.name, skill);
+      }
+    }
+    return Array.from(seen.values());
   }, [filter, query, skills]);
 
   const agentPresenceBySkillName = useMemo(() => {
@@ -159,15 +171,21 @@ export default function App() {
   }
 
   async function openSkill(skill: Skill, relativePath = "SKILL.md") {
-    setSelectedSkill(skill);
+    // If multiple agents have this skill, prefer the one matching the current agent filter
+    let target = skill;
+    if (filter.agentId && skill.agentId !== filter.agentId) {
+      const match = skills.find((s) => s.name === skill.name && s.agentId === filter.agentId);
+      if (match) target = match;
+    }
+    setSelectedSkill(target);
     setSelectedFile(relativePath);
     setError(null);
     setDiffView(null);
     try {
       const [result, targets, snaps] = await Promise.all([
-        api.readSkillFile(skill.id, relativePath),
-        api.getSyncTargets(skill.id),
-        api.getSnapshots(skill.id),
+        api.readSkillFile(target.id, relativePath),
+        api.getSyncTargets(target.id),
+        api.getSnapshots(target.id),
       ]);
       setFileState(result);
       setEditorValue(result.content);
@@ -488,7 +506,7 @@ export default function App() {
         <div className="section-title">收藏</div>
         <nav className="nav-section">
           <button className={navClass(Boolean(filter.starred))} onClick={() => { setPane("skills"); setFilter({ starred: true }); }}>
-            <Star size={16} /> 收藏夹 <span className="nav-count">{skills.filter((skill) => skill.starred).length}</span>
+            <Star size={16} /> 收藏夹 <span className="nav-count">{new Set(skills.filter((skill) => skill.starred).map((skill) => skill.name)).size}</span>
           </button>
         </nav>
 
@@ -497,7 +515,7 @@ export default function App() {
           {agents.map((agent) => (
             <button key={agent.id} className={navClass(filter.agentId === agent.id)} onClick={() => { setPane("skills"); setFilter({ agentId: agent.id }); }}>
               <FolderOpen size={16} /> {agent.name}
-              <span className="nav-count">{skills.filter((skill) => skill.agentId === agent.id).length}</span>
+              <span className="nav-count">{new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}</span>
             </button>
           ))}
         </nav>
@@ -526,7 +544,7 @@ export default function App() {
           {!selectedSkill && pane === "skills" && (
             <div className="topbar-stats">
               <span>{agents.length} Agents</span>
-              <span>{skills.length} Skills</span>
+              <span>{new Set(skills.map((skill) => skill.name)).size} Skills</span>
             </div>
           )}
           {!selectedSkill && pane === "skills" && (
@@ -750,7 +768,7 @@ export default function App() {
 
       <footer className="statusbar">
         <span>{agents.length} agents</span>
-        <span>{skills.length} skills</span>
+        <span>{new Set(skills.map((skill) => skill.name)).size} skills</span>
         <span>{saveStateText(saveState)}</span>
       </footer>
     </div>
