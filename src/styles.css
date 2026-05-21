@@ -303,6 +303,10 @@ button {
   overflow-x: auto;
   overflow-y: hidden;
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
   scrollbar-width: none;
 }
 
