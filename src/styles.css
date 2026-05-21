@@ -389,6 +389,13 @@ button {
   color: var(--text);
 }
 
+.home-tab {
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  justify-content: center;
+}
+
 .main .topbar {
   margin-top: 22px;
 }

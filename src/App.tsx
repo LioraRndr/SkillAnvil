@@ -13,6 +13,7 @@ import {
   FileText,
   FolderOpen,
   GitCompare,
+  Home,
   Grid2X2,
   History,
   Languages,
@@ -556,7 +557,7 @@ export default function App() {
 
         <div className="section-title">收藏</div>
         <nav className="nav-section">
-          <button className={navClass(Boolean(filter.starred))} onClick={() => { setPane("skills"); setFilter({ starred: true }); }}>
+          <button className={navClass(activeTabIndex < 0 && Boolean(filter.starred))} onClick={() => { setActiveTabIndex(-1); setPane("skills"); setFilter({ starred: true }); }}>
             <Star size={16} /> 收藏夹 <span className="nav-count">{new Set(skills.filter((skill) => skill.starred).map((skill) => skill.name)).size}</span>
           </button>
         </nav>
@@ -564,7 +565,7 @@ export default function App() {
         <div className="section-title">Agents</div>
         <nav className="nav-section grow">
           {agents.map((agent) => (
-            <button key={agent.id} className={navClass(filter.agentId === agent.id)} onClick={() => { setPane("skills"); setFilter({ agentId: agent.id }); }}>
+            <button key={agent.id} className={navClass(activeTabIndex < 0 && filter.agentId === agent.id)} onClick={() => { setActiveTabIndex(-1); setPane("skills"); setFilter({ agentId: agent.id }); }}>
               <FolderOpen size={16} /> {agent.name}
               <span className="nav-count">{new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}</span>
             </button>
@@ -574,7 +575,7 @@ export default function App() {
         <div className="section-title">标签</div>
         <nav className="nav-section">
           {builtinTags.map((tag) => (
-            <button key={tag.id} className={navClass(filter.tagId === tag.id)} onClick={() => { setPane("skills"); setFilter({ tagId: tag.id }); }}>
+            <button key={tag.id} className={navClass(activeTabIndex < 0 && filter.tagId === tag.id)} onClick={() => { setActiveTabIndex(-1); setPane("skills"); setFilter({ tagId: tag.id }); }}>
               <span className="tag-dot" style={{ background: tag.color }} /> {tag.name}
             </button>
           ))}
@@ -582,33 +583,38 @@ export default function App() {
 
         <div className="sidebar-actions">
           <button className="ghost-button" onClick={refresh}><RefreshCcw size={16} /> 扫描</button>
-          <button className="ghost-button" onClick={() => setPane("settings")}><SettingsIcon size={16} /> 设置</button>
+          <button className="ghost-button" onClick={() => { setActiveTabIndex(-1); setPane("settings"); }}><SettingsIcon size={16} /> 设置</button>
         </div>
       </aside>
 
       <main className="main">
-        {tabs.length > 0 && (
-          <div className="tab-bar">
-            {tabs.map((tab, index) => (
-              <button
-                key={`${tab.skill.id}-${tab.selectedFile}`}
-                className={index === activeTabIndex ? "tab active" : "tab"}
-                onClick={() => switchTab(index)}
-                title={`${tab.skill.displayName} — ${tab.selectedFile}`}
+        <div className="tab-bar">
+          <button
+            className={activeTabIndex < 0 ? "tab home-tab active" : "tab home-tab"}
+            onClick={() => { setActiveTabIndex(-1); setPane("skills"); }}
+            title="Skill 总览"
+          >
+            <Home size={14} />
+          </button>
+          {tabs.map((tab, index) => (
+            <button
+              key={`${tab.skill.id}-${tab.selectedFile}`}
+              className={index === activeTabIndex ? "tab active" : "tab"}
+              onClick={() => switchTab(index)}
+              title={`${tab.skill.displayName} — ${tab.selectedFile}`}
+            >
+              <span className="tab-label">{tab.skill.displayName}</span>
+              {tab.saveState === "dirty" && <span className="tab-dot" />}
+              <span
+                className="tab-close"
+                onClick={(e) => { e.stopPropagation(); closeTab(index); }}
+                title="关闭标签页"
               >
-                <span className="tab-label">{tab.skill.displayName}</span>
-                {tab.saveState === "dirty" && <span className="tab-dot" />}
-                <span
-                  className="tab-close"
-                  onClick={(e) => { e.stopPropagation(); closeTab(index); }}
-                  title="关闭标签页"
-                >
-                  <X size={12} />
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
+                <X size={12} />
+              </span>
+            </button>
+          ))}
+        </div>
 
         <header className="topbar">
           <div>
