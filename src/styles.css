@@ -1284,6 +1284,53 @@ input[type="checkbox"]:focus-visible {
   font-size: 12px;
 }
 
+.toast-container {
+  position: fixed;
+  bottom: 44px;
+  right: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  padding: 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  pointer-events: auto;
+  animation: toast-in 200ms ease;
+  transition: opacity 200ms ease;
+}
+
+.toast-success {
+  border-color: color-mix(in srgb, var(--good) 50%, var(--line-strong));
+  background: color-mix(in srgb, var(--good) 8%, var(--panel-solid));
+  color: var(--good);
+}
+
+.toast-error {
+  border-color: color-mix(in srgb, var(--danger) 50%, var(--line-strong));
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel-solid));
+  color: var(--danger);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .topbar-actions {
   display: flex;
   gap: 8px;

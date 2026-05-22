@@ -76,6 +76,10 @@ const builtinTags: Tag[] = [
   { id: "review", name: "审查", color: "#fcd34d" }
 ];
 
+type ToastType = "success" | "error" | "info";
+type Toast = { id: number; message: string; type: ToastType };
+let toastIdSeq = 0;
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -94,7 +98,14 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [diffView, setDiffView] = useState<DiffView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const saveTimer = useRef<number | null>(null);
+
+  function showToast(message: string, type: ToastType = "success") {
+    const id = ++toastIdSeq;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3000);
+  }
   const saveTimerTabId = useRef<string | null>(null);
 
   const activeTab = activeTabIndex >= 0 && activeTabIndex < tabs.length ? tabs[activeTabIndex] : null;
@@ -294,7 +305,7 @@ export default function App() {
     try {
       await api.cloneSkill(skill.id, newName);
       setSkills(await api.getSkills({}));
-      setError(`已克隆 ${skill.displayName}。`);
+      showToast(`已克隆 ${skill.displayName}`);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -358,7 +369,7 @@ export default function App() {
         const newTargets = await api.getSyncTargets(refreshed.id);
         updateActiveTab({ syncTargets: newTargets });
       }
-      setError(`${activeTab.skill.displayName} 已${actionLabel}到 ${target.agentName}。`);
+      showToast(`${activeTab.skill.displayName} 已${actionLabel}到 ${target.agentName}`);
     } catch (err) {
       setError(`同步失败：${errorMessage(err)}`);
     }
@@ -412,7 +423,7 @@ export default function App() {
           updateActiveTab({ syncTargets: newTargets });
         }
       }
-      setError(`已同步到 ${selectedTargets.map((target) => target.agentName).join("、")}。`);
+      showToast(`已同步到 ${selectedTargets.map((target) => target.agentName).join("、")}`);
       setSyncDraft(null);
     } catch (err) {
       setError(`同步失败：${errorMessage(err)}`);
@@ -862,6 +873,12 @@ export default function App() {
         <span>{new Set(skills.map((skill) => skill.name)).size} skills</span>
         {activeTab && <span>{saveStateText(activeTab.saveState)}</span>}
       </footer>
+
+      <div className="toast-container">
+        {toasts.map((toast) => (
+          <div key={toast.id} className={`toast toast-${toast.type}`}>{toast.message}</div>
+        ))}
+      </div>
     </div>
   );
 }
