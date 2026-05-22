@@ -348,27 +348,17 @@ export default function App() {
   async function syncSelected(target: SyncTargetStatus) {
     if (!activeTab) return;
     if (target.status === "same") return;
-    const action = target.status === "missing" ? "新增" : "覆盖";
-    const details = [
-      `目标 Agent：${target.agentName}`,
-      `状态：${statusLabel(target.status)}`,
-      `源路径：${activeTab.skill.dirPath}`,
-      `目标路径：${target.targetPath}`,
-      target.status === "different" ? "目标目录内容不同，继续后旧目录会先移至系统回收站，再复制当前 Skill。" : "目标 Agent 下不存在该 Skill，继续后会复制当前 Skill。"
-    ].join("\n");
-    const ok = window.confirm(`确认${action} ${activeTab.skill.displayName}？\n\n${details}`);
-    if (!ok) return;
+    const actionLabel = target.status === "missing" ? "新增" : "覆盖";
     try {
       const nextSkills = await api.syncSkill(activeTab.skill.id, [target.agentId]);
       setSkills(nextSkills);
-      // Find the same skill in the refreshed list to update the tab
       const refreshed = nextSkills.find((s) => s.name === activeTab.skill.name && s.agentId === activeTab.skill.agentId);
       if (refreshed) {
         updateActiveTab({ skill: refreshed });
         const newTargets = await api.getSyncTargets(refreshed.id);
         updateActiveTab({ syncTargets: newTargets });
       }
-      setError(`已同步到 ${target.agentName}。`);
+      setError(`${activeTab.skill.displayName} 已${actionLabel}到 ${target.agentName}。`);
     } catch (err) {
       setError(`同步失败：${errorMessage(err)}`);
     }
@@ -410,19 +400,10 @@ export default function App() {
     if (!syncDraft || syncDraft.selectedAgentIds.length === 0) return;
     const selectedTargets = syncDraft.targets.filter((target) => syncDraft.selectedAgentIds.includes(target.agentId));
     const overwriteTargets = selectedTargets.filter((target) => target.status === "different");
-    const details = [
-      `源 Skill：${syncDraft.skill.displayName}`,
-      `源路径：${syncDraft.skill.dirPath}`,
-      `目标：${selectedTargets.map((target) => `${target.agentName}（${statusLabel(target.status)}）`).join("、")}`,
-      overwriteTargets.length > 0 ? "包含内容不同的目标目录，继续后旧目录会先移至系统回收站，再复制当前 Skill。" : "只会向缺失目标新增当前 Skill。"
-    ].join("\n");
-    const ok = window.confirm(`确认同步？\n\n${details}`);
-    if (!ok) return;
     setSyncBusy(true);
     try {
       const nextSkills = await api.syncSkill(syncDraft.skill.id, syncDraft.selectedAgentIds);
       setSkills(nextSkills);
-      // Refresh sync targets for the active tab using name-based matching
       if (activeTab) {
         const refreshed = nextSkills.find((s) => s.name === activeTab.skill.name && s.agentId === activeTab.skill.agentId);
         if (refreshed) {
@@ -777,8 +758,8 @@ export default function App() {
       </main>
 
       {syncDraft && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => !syncBusy && setSyncDraft(null)}>
-          <section className="sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget && !syncBusy) setSyncDraft(null); }}>
+          <section className="sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title">
             <header>
               <div>
                 <h2 id="sync-title">同步 {syncDraft.skill.displayName}</h2>
@@ -927,7 +908,7 @@ function SkillCard({
       <footer>
         <span>v{skill.version || "0.0.0"}</span>
         <div className="card-actions">
-          {canSync && <button onClick={() => onSync(skill)}>同步</button>}
+          {canSync && <button onClick={(e) => { e.stopPropagation(); onSync(skill); }}>同步</button>}
           <button onClick={() => onOpen(skill)}>编辑</button>
         </div>
       </footer>
