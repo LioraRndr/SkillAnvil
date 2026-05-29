@@ -29,6 +29,58 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import gooseSvg from "./assets/goose.svg";
+import hermesagentSvg from "./assets/hermesagent.svg";
+import junieColorSvg from "./assets/junie-color.svg";
+import kilocodeSvg from "./assets/kilocode.svg";
+import kimiSvg from "./assets/kimi.svg";
+import openclawColorSvg from "./assets/openclaw-color.svg";
+import openhandsColorSvg from "./assets/openhands-color.svg";
+import qoderColorSvg from "./assets/qoder-color.svg";
+import roocodeSvg from "./assets/roocode.svg";
+import traeColorSvg from "./assets/trae-color.svg";
+import zencoderColorSvg from "./assets/zencoder-color.svg";
+import antigravityColorSvg from "./assets/antigravity-color.svg";
+import claudeColorSvg from "./assets/claude-color.svg";
+import clineSvg from "./assets/cline.svg";
+import codebuddyColorSvg from "./assets/codebuddy-color.svg";
+import codexColorSvg from "./assets/codex-color.svg";
+
+const agentIconMap: Record<string, string> = {
+  goose: gooseSvg,
+  hermes: hermesagentSvg,
+  junie: junieColorSvg,
+  kilo: kilocodeSvg,
+  kimi: kimiSvg,
+  openclaw: openclawColorSvg,
+  openhands: openhandsColorSvg,
+  qoder: qoderColorSvg,
+  roo: roocodeSvg,
+  trae: traeColorSvg,
+  zencoder: zencoderColorSvg,
+  antigravity: antigravityColorSvg,
+  claude: claudeColorSvg,
+  cline: clineSvg,
+  codebuddy: codebuddyColorSvg,
+  codex: codexColorSvg,
+};
+
+function AgentIcon({ icon, size = 16 }: { icon: string; size?: number }) {
+  const src = agentIconMap[icon];
+  if (src) {
+    return (
+      <img
+        src={src}
+        alt=""
+        className="agent-icon"
+        style={{ width: size, height: size }}
+        width={size}
+        height={size}
+      />
+    );
+  }
+  return <FolderOpen size={size} />;
+}
 import { api } from "./api";
 import type { Agent, GithubUpdate, ReadFileResult, ScanIssue, Settings, Skill, SkillFilter, Snapshot, SyncTargetStatus, Tag } from "./types";
 
@@ -59,7 +111,14 @@ type Tab = {
   saveState: SaveState;
   syncTargets: SyncTargetStatus[];
   snapshots: Snapshot[];
+  scrollY: number;
 };
+
+const defaultTags: Tag[] = [
+  { id: "writing", name: "写作", color: "#7dd3fc" },
+  { id: "coding", name: "开发", color: "#86efac" },
+  { id: "review", name: "审查", color: "#fcd34d" }
+];
 
 const defaultSettings: Settings = {
   language: "zh-CN",
@@ -67,14 +126,9 @@ const defaultSettings: Settings = {
   shortcut: navigator.platform.toLowerCase().includes("mac") ? "Cmd+Shift+K" : "Ctrl+Shift+K",
   minimizeToTray: true,
   customAgents: [],
-  snapshotsEnabled: true
+  snapshotsEnabled: true,
+  customTags: defaultTags
 };
-
-const builtinTags: Tag[] = [
-  { id: "writing", name: "写作", color: "#7dd3fc" },
-  { id: "coding", name: "开发", color: "#86efac" },
-  { id: "review", name: "审查", color: "#fcd34d" }
-];
 
 type ToastType = "success" | "error" | "info";
 type Toast = { id: number; message: string; type: ToastType };
@@ -87,6 +141,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [pane, setPane] = useState<Pane>("skills");
+  const [homeState, setHomeState] = useState<{ pane: Pane; filter: SkillFilter; scrollY: number }>({ pane: "skills", filter: {}, scrollY: 0 });
+  const mainRef = useRef<HTMLElement>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabIndex, setActiveTabIndex] = useState(-1);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
@@ -100,6 +156,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const saveTimer = useRef<number | null>(null);
+  const [addingCategoryForAgent, setAddingCategoryForAgent] = useState<string | null>(null);
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [addingTag, setAddingTag] = useState(false);
+  const [editingTagId, setEditingTagId] = useState<string | null>(null);
+  const [cloningSkill, setCloningSkill] = useState<Skill | null>(null);
 
   function showToast(message: string, type: ToastType = "success") {
     const id = ++toastIdSeq;
@@ -113,10 +174,20 @@ export default function App() {
 
   const visibleSkills = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Get category skill names if filtering by category
+    let categorySkillNames: Set<string> | null = null;
+    if (filter.categoryId && filter.categoryAgentId) {
+      const agentConfig = settings.customAgents.find((a) => a.id === filter.categoryAgentId);
+      const category = agentConfig?.categories?.find((c) => c.id === filter.categoryId);
+      if (category) {
+        categorySkillNames = new Set(category.skillNames);
+      }
+    }
     const filtered = skills.filter((skill) => {
       if (filter.agentId && skill.agentId !== filter.agentId) return false;
       if (filter.starred && !skill.starred) return false;
       if (filter.tagId && !skill.tags.some((tag) => tag.id === filter.tagId)) return false;
+      if (categorySkillNames && !categorySkillNames.has(skill.name)) return false;
       if (!q) return true;
       return [skill.displayName, skill.name, skill.description, skill.version, skill.dirPath]
         .join(" ")
@@ -133,7 +204,7 @@ export default function App() {
       }
     }
     return Array.from(seen.values());
-  }, [filter, query, skills]);
+  }, [filter, query, skills, settings.customAgents]);
 
   const agentPresenceBySkillName = useMemo(() => {
     const groups = new Map<string, string[]>();
@@ -200,8 +271,20 @@ export default function App() {
       if (match) target = match;
     }
 
-    // Check if this skill+file is already open in a tab
-    const existingIndex = tabs.findIndex((t) => t.skill.id === target.id && t.selectedFile === relativePath);
+    // Save current home state before opening a tab
+    const currentScrollY = mainRef.current?.scrollTop ?? 0;
+    setHomeState({ pane, filter, scrollY: currentScrollY });
+    // Also save current tab's scroll position if one is active
+    if (activeTabIndex >= 0) {
+      const currentTab = tabs[activeTabIndex];
+      if (currentTab) {
+        const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+        tabScrollRef.current.set(key, currentScrollY);
+      }
+    }
+
+    // Check if this skill (by name) + file is already open in a tab
+    const existingIndex = tabs.findIndex((t) => t.skill.name === target.name && t.selectedFile === relativePath);
     if (existingIndex >= 0) {
       setActiveTabIndex(existingIndex);
       setPane("skills");
@@ -224,6 +307,7 @@ export default function App() {
         saveState: "saved",
         syncTargets: targets,
         snapshots: snaps,
+        scrollY: 0,
       };
       setTabs((prev) => [...prev, newTab]);
       setActiveTabIndex(tabs.length);
@@ -286,29 +370,28 @@ export default function App() {
     }
   }
 
-  async function cloneSelected() {
-    if (!activeTab) return;
-    const newName = window.prompt("输入克隆后的 Skill 名称", `${activeTab.skill.name}-copy`);
-    if (!newName) return;
+  async function doCloneSkill(skill: Skill, newName: string) {
     try {
-      const created = await api.cloneSkill(activeTab.skill.id, newName);
+      const created = await api.cloneSkill(skill.id, newName);
       setSkills(await api.getSkills({}));
-      await openSkill(created);
+      if (activeTab && skill.id === activeTab.skill.id) {
+        await openSkill(created);
+      } else {
+        showToast(`已克隆 ${skill.displayName}`);
+      }
     } catch (err) {
       setError(errorMessage(err));
     }
+    setCloningSkill(null);
   }
 
-  async function cloneSkillDirect(skill: Skill) {
-    const newName = window.prompt("输入克隆后的 Skill 名称", `${skill.name}-copy`);
-    if (!newName) return;
-    try {
-      await api.cloneSkill(skill.id, newName);
-      setSkills(await api.getSkills({}));
-      showToast(`已克隆 ${skill.displayName}`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+  function cloneSelected() {
+    if (!activeTab) return;
+    setCloningSkill(activeTab.skill);
+  }
+
+  function cloneSkillDirect(skill: Skill) {
+    setCloningSkill(skill);
   }
 
   async function trashSkillDirect(skill: Skill) {
@@ -533,9 +616,46 @@ export default function App() {
     }
   }
 
+  const [pendingScrollY, setPendingScrollY] = useState<number | null>(null);
+  const tabScrollRef = useRef<Map<string, number>>(new Map());
+
   function switchTab(index: number) {
+    // Save current tab's scroll position synchronously to ref
+    if (activeTabIndex >= 0) {
+      const currentTab = tabs[activeTabIndex];
+      if (currentTab) {
+        const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+        tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+      }
+    }
+    // Read target tab's scroll position from ref
+    const targetTab = tabs[index];
+    const targetScrollY = targetTab
+      ? (tabScrollRef.current.get(`${targetTab.skill.name}::${targetTab.selectedFile}`) ?? 0)
+      : 0;
     setActiveTabIndex(index);
+    setPendingScrollY(targetScrollY);
   }
+
+  // Restore scroll position after render completes
+  useEffect(() => {
+    if (pendingScrollY !== null) {
+      const el = mainRef.current;
+      if (!el) return;
+      // Try restoring multiple times to handle async editor mount
+      let restored = false;
+      function restore() {
+        if (restored || !mainRef.current) return;
+        mainRef.current.scrollTop = pendingScrollY!;
+        restored = true;
+      }
+      restore();
+      const t1 = setTimeout(restore, 50);
+      const t2 = setTimeout(restore, 200);
+      const t3 = setTimeout(() => { restore(); setPendingScrollY(null); }, 350);
+      return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+    }
+  }, [activeTabIndex, pendingScrollY]);
 
   const themeClass = settings.theme === "light" ? "theme-light" : settings.theme === "system" ? "theme-system" : "theme-dark";
   const activeSyncTargets = syncDraft?.targets.filter((target) => target.status !== "same") ?? [];
@@ -559,41 +679,239 @@ export default function App() {
 
         <div className="section-title">收藏</div>
         <nav className="nav-section">
-          <button className={navClass(activeTabIndex < 0 && Boolean(filter.starred))} onClick={() => { setActiveTabIndex(-1); setPane("skills"); setFilter({ starred: true }); }}>
+          <button className={navClass(activeTabIndex < 0 && Boolean(filter.starred))} onClick={() => {
+            const newFilter = { starred: true };
+            if (activeTabIndex >= 0) {
+              const currentTab = tabs[activeTabIndex];
+              if (currentTab) {
+                const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+              }
+              setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+              setPendingScrollY(0);
+            } else {
+              setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+            }
+            setActiveTabIndex(-1);
+            setPane("skills");
+            setFilter(newFilter);
+          }}>
             <Star size={16} /> 收藏夹 <span className="nav-count">{new Set(skills.filter((skill) => skill.starred).map((skill) => skill.name)).size}</span>
           </button>
         </nav>
 
         <div className="section-title">Agents</div>
         <nav className="nav-section grow">
-          {agents.map((agent) => (
-            <button key={agent.id} className={navClass(activeTabIndex < 0 && filter.agentId === agent.id)} onClick={() => { setActiveTabIndex(-1); setPane("skills"); setFilter({ agentId: agent.id }); }}>
-              <FolderOpen size={16} /> {agent.name}
-              <span className="nav-count">{new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}</span>
-            </button>
-          ))}
+          {agents.map((agent) => {
+            const agentConfig = settings.customAgents.find((a) => a.id === agent.id);
+            const categories = agentConfig?.categories ?? [];
+            return (
+              <div key={agent.id} className="agent-nav-group">
+                <div className="agent-nav-row">
+                  <button className={navClass(activeTabIndex < 0 && filter.agentId === agent.id && !filter.categoryId)} onClick={() => {
+                    const newFilter = { agentId: agent.id };
+                    if (activeTabIndex >= 0) {
+                      const currentTab = tabs[activeTabIndex];
+                      if (currentTab) {
+                        const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                        tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+                      }
+                      setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+                      setPendingScrollY(0);
+                    } else {
+                      setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+                    }
+                    setActiveTabIndex(-1);
+                    setPane("skills");
+                    setFilter(newFilter);
+                  }}>
+                    <AgentIcon icon={agent.icon || ""} size={16} /> {agent.name}
+                    <span className="nav-count">{new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}</span>
+                  </button>
+                  {addingCategoryForAgent === agent.id ? (
+                    <InlineInput
+                      placeholder="分类名称"
+                      compact
+                      onSubmit={(name) => {
+                        const newCat = { id: `cat-${crypto.randomUUID().slice(0, 8)}`, name, skillNames: [] as string[] };
+                        const newCats = [...(agentConfig?.categories ?? []), newCat];
+                        updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                        setAddingCategoryForAgent(null);
+                      }}
+                      onCancel={() => setAddingCategoryForAgent(null)}
+                    />
+                  ) : (
+                    <button className="add-category-icon" onClick={(e) => {
+                      e.stopPropagation();
+                      setAddingCategoryForAgent(agent.id);
+                    }} title="添加分类">+</button>
+                  )}
+                </div>
+                <div className="agent-categories">
+                  {categories.map((cat) => (
+                    <div key={cat.id} className="sidebar-category-item">
+                      <button
+                        className={navClass(activeTabIndex < 0 && filter.categoryId === cat.id && filter.categoryAgentId === agent.id)}
+                        onClick={() => {
+                          const newFilter = { agentId: agent.id, categoryId: cat.id, categoryAgentId: agent.id };
+                          if (activeTabIndex >= 0) {
+                            const currentTab = tabs[activeTabIndex];
+                            if (currentTab) {
+                              const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                              tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+                            }
+                            setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+                            setPendingScrollY(0);
+                          } else {
+                            setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+                          }
+                          setActiveTabIndex(-1);
+                          setPane("skills");
+                          setFilter(newFilter);
+                        }}
+                      >
+                        <span className="category-dot" />{cat.name}
+                        <span className="nav-count">{cat.skillNames.length}</span>
+                      </button>
+                      {editingCategoryId === cat.id ? (
+                        <InlineInput
+                          placeholder="分类名称"
+                          compact
+                          onSubmit={(name) => {
+                            const newCats = (agentConfig?.categories ?? []).map((c) => c.id === cat.id ? { ...c, name } : c);
+                            updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                            setEditingCategoryId(null);
+                          }}
+                          onCancel={() => setEditingCategoryId(null)}
+                        />
+                      ) : (
+                        <div className="sidebar-item-actions">
+                          <button className="icon-btn" onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingCategoryId(cat.id);
+                          }} title="编辑"><SettingsIcon size={10} /></button>
+                          <button className="icon-btn danger" onClick={(e) => {
+                            e.stopPropagation();
+                            const newCats = (agentConfig?.categories ?? []).filter((c) => c.id !== cat.id);
+                            updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                          }} title="删除"><X size={10} /></button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </nav>
 
-        <div className="section-title">标签</div>
+        <div className="section-title">
+          <span>标签</span>
+          {addingTag ? (
+            <InlineInput
+              placeholder="标签名称"
+              compact
+              onSubmit={(name) => {
+                const colors = ["#7dd3fc", "#86efac", "#fcd34d", "#fca5a5", "#c4b5fd", "#fdba74", "#a5b4fc"];
+                const color = colors[settings.customTags.length % colors.length];
+                updateSettings({ ...settings, customTags: [...settings.customTags, { id: `tag-${crypto.randomUUID().slice(0, 8)}`, name, color }] });
+                setAddingTag(false);
+              }}
+              onCancel={() => setAddingTag(false)}
+            />
+          ) : (
+            <button className="add-btn" onClick={() => setAddingTag(true)}>+</button>
+          )}
+        </div>
         <nav className="nav-section">
-          {builtinTags.map((tag) => (
-            <button key={tag.id} className={navClass(activeTabIndex < 0 && filter.tagId === tag.id)} onClick={() => { setActiveTabIndex(-1); setPane("skills"); setFilter({ tagId: tag.id }); }}>
-              <span className="tag-dot" style={{ background: tag.color }} /> {tag.name}
-            </button>
+          {settings.customTags.map((tag) => (
+            <div key={tag.id} className="sidebar-tag-item">
+              <button className={navClass(activeTabIndex < 0 && filter.tagId === tag.id)} onClick={() => {
+                const newFilter = { tagId: tag.id };
+                if (activeTabIndex >= 0) {
+                  const currentTab = tabs[activeTabIndex];
+                  if (currentTab) {
+                    const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                    tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+                  }
+                  setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+                  setPendingScrollY(0);
+                } else {
+                  setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+                }
+                setActiveTabIndex(-1);
+                setPane("skills");
+                setFilter(newFilter);
+              }}>
+                <span className="tag-dot" style={{ background: tag.color }} /> {tag.name}
+              </button>
+              {editingTagId === tag.id ? (
+                <InlineInput
+                  placeholder="标签名称"
+                  compact
+                  onSubmit={(name) => {
+                    updateSettings({ ...settings, customTags: settings.customTags.map((t) => t.id === tag.id ? { ...t, name } : t) });
+                    setEditingTagId(null);
+                  }}
+                  onCancel={() => setEditingTagId(null)}
+                />
+              ) : (
+                <div className="sidebar-item-actions">
+                  <button className="icon-btn" onClick={(e) => {
+                    e.stopPropagation();
+                    setEditingTagId(tag.id);
+                  }} title="编辑"><SettingsIcon size={12} /></button>
+                  <button className="icon-btn danger" onClick={(e) => {
+                    e.stopPropagation();
+                    updateSettings({ ...settings, customTags: settings.customTags.filter((t) => t.id !== tag.id) });
+                  }} title="删除"><X size={12} /></button>
+                </div>
+              )}
+            </div>
           ))}
         </nav>
 
         <div className="sidebar-actions">
           <button className="ghost-button" onClick={refresh}><RefreshCcw size={16} /> 扫描</button>
-          <button className="ghost-button" onClick={() => { setActiveTabIndex(-1); setPane("settings"); }}><SettingsIcon size={16} /> 设置</button>
+          <button className="ghost-button" onClick={() => {
+            if (activeTabIndex >= 0) {
+              const currentTab = tabs[activeTabIndex];
+              if (currentTab) {
+                const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+              }
+              setHomeState({ pane: "settings", filter: {}, scrollY: 0 });
+              setPendingScrollY(0);
+            } else {
+              setHomeState((prev) => ({ ...prev, pane: "settings", filter: {}, scrollY: 0 }));
+            }
+            setActiveTabIndex(-1);
+            setPane("settings");
+          }}><SettingsIcon size={16} /> 设置</button>
         </div>
       </aside>
 
-      <main className="main">
+      <main className="main" ref={mainRef}>
         <div className="tab-bar">
           <button
             className={activeTabIndex < 0 ? "tab home-tab active" : "tab home-tab"}
-            onClick={() => { setActiveTabIndex(-1); setPane("skills"); }}
+            onClick={() => {
+              if (activeTabIndex >= 0) {
+                // Save current tab scroll to ref
+                const currentTab = tabs[activeTabIndex];
+                if (currentTab) {
+                  const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                  tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+                }
+                setPendingScrollY(homeState.scrollY);
+              } else {
+                // Already on home - save current scroll position
+                setHomeState((prev) => ({ ...prev, scrollY: mainRef.current?.scrollTop ?? 0 }));
+              }
+              setActiveTabIndex(-1);
+              setPane(homeState.pane);
+              setFilter(homeState.filter);
+            }}
             title="Skill 总览"
           >
             <Home size={14} />
@@ -693,9 +1011,16 @@ export default function App() {
               <button className="wide-button" onClick={openSelectedInFileManager}><FolderOpen size={16} /> 在文件管理器中显示</button>
               <h2>标签</h2>
               <TagPicker
-                tags={builtinTags}
+                tags={settings.customTags}
                 value={activeTab.skill.tags}
                 onChange={updateSelectedSkillTags}
+              />
+              <h2>子分类</h2>
+              <CategoryPicker
+                agentId={activeTab.skill.agentId}
+                skillName={activeTab.skill.name}
+                settings={settings}
+                onChange={updateSettings}
               />
               <h2>同步到</h2>
               <div className="sync-list">
@@ -703,21 +1028,29 @@ export default function App() {
                   <p className="muted-copy">没有其他已启用的 Agent。可在设置中启用更多 Agent。</p>
                 ) : activeTab.syncTargets.every((t) => t.status === "same") ? (
                   <>
-                    {activeTab.syncTargets.map((target) => (
-                      <button key={target.agentId} disabled title={target.targetPath}>
-                        <span>{target.agentName}</span>
-                        <em>{statusLabel(target.status)}</em>
-                      </button>
-                    ))}
+                    {activeTab.syncTargets.map((target) => {
+                      const agent = agents.find((a) => a.id === target.agentId);
+                      return (
+                        <button key={target.agentId} disabled title={target.targetPath}>
+                          <AgentIcon icon={agent?.icon || ""} size={14} />
+                          <span>{target.agentName}</span>
+                          <em>{statusLabel(target.status)}</em>
+                        </button>
+                      );
+                    })}
                     <p className="muted-copy">所有目标均已同步，无需操作。</p>
                   </>
                 ) : (
-                  activeTab.syncTargets.map((target) => (
-                    <button key={target.agentId} disabled={target.status === "same"} title={target.targetPath} onClick={() => syncSelected(target)}>
-                      <span>{target.agentName}</span>
-                      <em>{statusLabel(target.status)}</em>
-                    </button>
-                  ))
+                  activeTab.syncTargets.map((target) => {
+                    const agent = agents.find((a) => a.id === target.agentId);
+                    return (
+                      <button key={target.agentId} disabled={target.status === "same"} title={target.targetPath} onClick={() => syncSelected(target)}>
+                        <AgentIcon icon={agent?.icon || ""} size={14} />
+                        <span>{target.agentName}</span>
+                        <em>{statusLabel(target.status)}</em>
+                      </button>
+                    );
+                  })
                 )}
               </div>
               <h2><History size={13} /> 版本历史</h2>
@@ -784,21 +1117,25 @@ export default function App() {
               ) : syncDraft.targets.every((t) => t.status === "same") ? (
                 <p className="muted-copy">该 Skill 已存在于所有已启用的 Agent 中，且内容一致，无需同步。</p>
               ) : (
-                syncDraft.targets.map((target) => (
-                  <label key={target.agentId} className={target.status === "same" ? "sync-target-row disabled" : "sync-target-row"}>
-                    <input
-                      type="checkbox"
-                      disabled={target.status === "same" || syncBusy}
-                      checked={syncDraft.selectedAgentIds.includes(target.agentId)}
-                      onChange={() => toggleSyncDraftTarget(target.agentId)}
-                    />
-                    <span>
-                      <strong>{target.agentName}</strong>
-                      <em title={target.targetPath}>{target.targetPath}</em>
-                    </span>
-                    <b className={`sync-badge ${target.status}`}>{statusLabel(target.status)}</b>
-                  </label>
-                ))
+                syncDraft.targets.map((target) => {
+                  const agent = agents.find((a) => a.id === target.agentId);
+                  return (
+                    <label key={target.agentId} className={target.status === "same" ? "sync-target-row disabled" : "sync-target-row"}>
+                      <input
+                        type="checkbox"
+                        disabled={target.status === "same" || syncBusy}
+                        checked={syncDraft.selectedAgentIds.includes(target.agentId)}
+                        onChange={() => toggleSyncDraftTarget(target.agentId)}
+                      />
+                      <AgentIcon icon={agent?.icon || ""} size={14} />
+                      <span>
+                        <strong>{target.agentName}</strong>
+                        <em title={target.targetPath}>{target.targetPath}</em>
+                      </span>
+                      <b className={`sync-badge ${target.status}`}>{statusLabel(target.status)}</b>
+                    </label>
+                  );
+                })
               )}
             </div>
             <footer>
@@ -868,6 +1205,26 @@ export default function App() {
         </div>
       )}
 
+      {cloningSkill && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCloningSkill(null)}>
+          <section className="sync-modal" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()} style={{ maxWidth: 400 }}>
+            <header>
+              <h2>克隆 {cloningSkill.displayName}</h2>
+              <button className="icon-button" onClick={() => setCloningSkill(null)}><X size={16} /></button>
+            </header>
+            <div style={{ padding: 14 }}>
+              <p style={{ margin: "0 0 10px", color: "var(--muted)", fontSize: 13 }}>输入克隆后的 Skill 名称：</p>
+              <InlineInput
+                wide
+                placeholder={`${cloningSkill.name}-copy`}
+                onSubmit={(name) => void doCloneSkill(cloningSkill, name)}
+                onCancel={() => setCloningSkill(null)}
+              />
+            </div>
+          </section>
+        </div>
+      )}
+
       <footer className="statusbar">
         <span>{agents.length} agents</span>
         <span>{new Set(skills.map((skill) => skill.name)).size} skills</span>
@@ -914,7 +1271,6 @@ function SkillCard({
         <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={() => onToggleStar(skill)} title="收藏">
           <Star size={17} />
         </button>
-        <span>{agentName(agents, skill.agentId)}</span>
       </div>
       <h2>{skill.displayName}</h2>
       <p>{skill.description || "未提供描述"}</p>
@@ -939,10 +1295,10 @@ function AgentPresence({ agentIds, agents }: { agentIds: string[]; agents: Agent
   return (
     <div className="agent-presence" title={agentIds.map((id) => agentName(agents, id)).join("、")}>
       {visibleIds.map((id) => {
-        const name = agentName(agents, id);
-        return <span key={id}>{agentInitials(name)}</span>;
+        const agent = agents.find((a) => a.id === id);
+        return <AgentIcon key={id} icon={agent?.icon || ""} size={14} />;
       })}
-      {hiddenCount > 0 && <span>+{hiddenCount}</span>}
+      {hiddenCount > 0 && <span className="agent-more">+{hiddenCount}</span>}
     </div>
   );
 }
@@ -972,26 +1328,178 @@ function TagPicker({ tags, value, onChange }: { tags: Tag[]; value: Tag[]; onCha
   );
 }
 
+function CategoryPicker({
+  agentId,
+  skillName,
+  settings,
+  onChange
+}: {
+  agentId: string;
+  skillName: string;
+  settings: Settings;
+  onChange: (settings: Settings) => void;
+}) {
+  const agentConfig = settings.customAgents.find((a) => a.id === agentId);
+  const categories = agentConfig?.categories || [];
+
+  if (categories.length === 0) {
+    return <p className="muted-copy">该 Agent 暂无子分类，可在设置中添加。</p>;
+  }
+
+  function toggleCategory(categoryId: string, currentlyInCategory: boolean) {
+    const newCategories = (agentConfig?.categories || []).map((cat) => {
+      if (cat.id !== categoryId) return cat;
+      const newSkillNames = currentlyInCategory
+        ? cat.skillNames.filter((n) => n !== skillName)
+        : [...cat.skillNames, skillName];
+      return { ...cat, skillNames: newSkillNames };
+    });
+    onChange({
+      ...settings,
+      customAgents: settings.customAgents.map((a) =>
+        a.id === agentId ? { ...a, categories: newCategories } : a
+      )
+    });
+  }
+
+  return (
+    <div className="category-picker">
+      {categories.map((cat) => {
+        const isInCategory = cat.skillNames.includes(skillName);
+        return (
+          <button
+            key={cat.id}
+            className={isInCategory ? "selected" : ""}
+            onClick={() => toggleCategory(cat.id, isInCategory)}
+          >
+            <span className="category-dot" style={{ background: isInCategory ? "var(--accent)" : "var(--muted)" }} />
+            {cat.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (settings: Settings) => void }) {
-  function addCustomAgent() {
-    const name = window.prompt("Agent 名称", "Custom Agent");
-    if (!name) return;
-    const path = window.prompt("Skill 目录绝对路径，例如 C:\\Users\\you\\.codex\\skills");
-    if (!path) return;
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [editingTagId, setEditingTagId] = useState<string | null>(null);
+  const [editingTag, setEditingTag] = useState<Tag>({ id: "", name: "", color: "#7dd3fc" });
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+  const [editingCategoryName, setEditingCategoryName] = useState("");
+  const [addingTag, setAddingTag] = useState(false);
+  const [addingCategoryForAgent, setAddingCategoryForAgent] = useState<string | null>(null);
+  const [addingAgent, setAddingAgent] = useState(false);
+  const [addingAgentStep, setAddingAgentStep] = useState<"name" | "path">("name");
+  const [addingAgentName, setAddingAgentName] = useState("");
+
+  function addTagWithName(name: string) {
+    const colors = ["#7dd3fc", "#86efac", "#fcd34d", "#fca5a5", "#c4b5fd", "#fdba74", "#a5b4fc"];
+    const color = colors[settings.customTags.length % colors.length];
+    const newTag: Tag = {
+      id: `tag-${crypto.randomUUID().slice(0, 8)}`,
+      name,
+      color
+    };
+    onChange({ ...settings, customTags: [...settings.customTags, newTag] });
+    setAddingTag(false);
+  }
+
+  function startEditTag(tag: Tag) {
+    setEditingTagId(tag.id);
+    setEditingTag({ ...tag });
+  }
+
+  function saveTagEdit() {
+    if (!editingTag.name.trim()) return;
+    onChange({
+      ...settings,
+      customTags: settings.customTags.map((t) => t.id === editingTagId ? editingTag : t)
+    });
+    setEditingTagId(null);
+  }
+
+  function deleteTag(id: string) {
+    onChange({
+      ...settings,
+      customTags: settings.customTags.filter((t) => t.id !== id)
+    });
+  }
+
+  function addCategoryWithName(agentId: string, name: string) {
+    const newCat = {
+      id: `cat-${crypto.randomUUID().slice(0, 8)}`,
+      name,
+      skillNames: [] as string[]
+    };
+    onChange({
+      ...settings,
+      customAgents: settings.customAgents.map((a) =>
+        a.id === agentId ? { ...a, categories: [...(a.categories || []), newCat] } : a
+      )
+    });
+    setAddingCategoryForAgent(null);
+  }
+
+  function startEditCategory(cat: { id: string; name: string }) {
+    setEditingCategoryId(cat.id);
+    setEditingCategoryName(cat.name);
+  }
+
+  function saveCategoryEdit(agentId: string) {
+    if (!editingCategoryName.trim()) return;
+    onChange({
+      ...settings,
+      customAgents: settings.customAgents.map((a) =>
+        a.id === agentId
+          ? { ...a, categories: (a.categories || []).map((c) => c.id === editingCategoryId ? { ...c, name: editingCategoryName } : c) }
+          : a
+      )
+    });
+    setEditingCategoryId(null);
+  }
+
+  function deleteCategory(agentId: string, categoryId: string) {
+    onChange({
+      ...settings,
+      customAgents: settings.customAgents.map((a) =>
+        a.id === agentId
+          ? { ...a, categories: (a.categories || []).filter((c) => c.id !== categoryId) }
+          : a
+      )
+    });
+  }
+
+  function updateCategorySkills(agentId: string, categoryId: string, skillNames: string[]) {
+    onChange({
+      ...settings,
+      customAgents: settings.customAgents.map((a) =>
+        a.id === agentId
+          ? { ...a, categories: (a.categories || []).map((c) => c.id === categoryId ? { ...c, skillNames } : c) }
+          : a
+      )
+    });
+  }
+
+  function addCustomAgentWithPath(path: string) {
     onChange({
       ...settings,
       customAgents: [
         ...settings.customAgents,
         {
           id: `custom-${crypto.randomUUID()}`,
-          name,
+          name: addingAgentName,
           paths: [path],
           enabled: true,
           builtin: false,
-          icon: "custom"
+          icon: "custom",
+          categories: []
         }
       ]
     });
+    setAddingAgent(false);
+    setAddingAgentStep("name");
+    setAddingAgentName("");
   }
 
   function updateAgentConfig(id: string, patch: Partial<Settings["customAgents"][number]>) {
@@ -1002,11 +1510,14 @@ function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (
   }
 
   function removeCustomAgent(id: string) {
+    if (selectedAgentId === id) setSelectedAgentId(null);
     onChange({
       ...settings,
       customAgents: settings.customAgents.filter((agent) => agent.id !== id)
     });
   }
+
+  const selectedAgent = selectedAgentId ? settings.customAgents.find((a) => a.id === selectedAgentId) : null;
 
   return (
     <section className="settings-panel">
@@ -1035,7 +1546,7 @@ function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (
       </div>
       <div className="setting-row">
         <div className="setting-copy"><ChevronsUpDown size={18} /><strong>全局快捷键</strong><span>macOS 默认 Cmd+Shift+K，Windows/Linux 默认 Ctrl+Shift+K。</span></div>
-        <input value={settings.shortcut} onChange={(event) => onChange({ ...settings, shortcut: event.target.value })} />
+        <ShortcutInput value={settings.shortcut} onChange={(shortcut) => onChange({ ...settings, shortcut })} />
       </div>
       <label className="toggle-row">
         <input type="checkbox" checked={settings.minimizeToTray} onChange={(event) => onChange({ ...settings, minimizeToTray: event.target.checked })} />
@@ -1048,31 +1559,138 @@ function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (
       <div className="custom-agent-panel">
         <header>
           <div>
-            <strong>Agent 目录</strong>
-            <span>启用后会显示在左侧 Agents 分组；每行一个 Skill 根目录，支持 ~。</span>
+            <strong>标签管理</strong>
+            <span>管理用于分类 Skill 的标签。</span>
           </div>
-          <button onClick={addCustomAgent}>添加路径</button>
+          {addingTag ? (
+            <InlineInput placeholder="标签名称" onSubmit={addTagWithName} onCancel={() => setAddingTag(false)} />
+          ) : (
+            <button onClick={() => setAddingTag(true)}>添加标签</button>
+          )}
         </header>
-        {settings.customAgents.length === 0 ? (
-          <p>尚未加载 Agent 配置。</p>
-        ) : (
-          settings.customAgents.map((agent) => (
-            <div className="custom-agent-row" key={agent.id}>
-              <div className="custom-agent-main">
-                <label>
-                  <input type="checkbox" checked={agent.enabled} onChange={(event) => updateAgentConfig(agent.id, { enabled: event.target.checked })} />
-                  <strong>{agent.name}</strong>
-                  <em>{agent.builtin ? "内置" : "自定义"}</em>
-                </label>
-                <textarea
-                  value={agent.paths.join("\n")}
-                  onChange={(event) => updateAgentConfig(agent.id, { paths: event.target.value.split(/\r?\n/).map((path) => path.trim()).filter(Boolean) })}
-                  rows={Math.max(2, Math.min(4, agent.paths.length))}
-                />
-              </div>
-              {!agent.builtin && <button onClick={() => removeCustomAgent(agent.id)}>移除</button>}
+        <div className="tag-manager">
+          {settings.customTags.map((tag) => (
+            <div key={tag.id} className="tag-manager-item">
+              <span className="tag-dot" style={{ background: tag.color }} />
+              {editingTagId === tag.id ? (
+                <>
+                  <input
+                    className="tag-edit-input"
+                    value={editingTag.name}
+                    onChange={(e) => setEditingTag({ ...editingTag, name: e.target.value })}
+                  />
+                  <input
+                    type="color"
+                    className="tag-edit-color"
+                    value={editingTag.color}
+                    onChange={(e) => setEditingTag({ ...editingTag, color: e.target.value })}
+                  />
+                  <button className="tag-edit-save" onClick={saveTagEdit}>保存</button>
+                  <button className="tag-edit-cancel" onClick={() => setEditingTagId(null)}>取消</button>
+                </>
+              ) : (
+                <>
+                  <span className="tag-manager-name">{tag.name}</span>
+                  <button className="tag-edit-btn" onClick={() => startEditTag(tag)}>编辑</button>
+                  <button className="tag-delete-btn" onClick={() => deleteTag(tag.id)}>删除</button>
+                </>
+              )}
             </div>
-          ))
+          ))}
+        </div>
+      </div>
+      <div className="custom-agent-panel">
+        <header>
+          <div>
+            <strong>Agent 目录</strong>
+            <span>点击 Agent 图标查看或编辑 Skill 路径；启用后会显示在左侧。</span>
+          </div>
+          {addingAgent ? (
+            addingAgentStep === "name" ? (
+              <InlineInput
+                placeholder="Agent 名称"
+                onSubmit={(name) => { setAddingAgentName(name); setAddingAgentStep("path"); }}
+                onCancel={() => { setAddingAgent(false); setAddingAgentStep("name"); setAddingAgentName(""); }}
+              />
+            ) : (
+              <InlineInput
+                placeholder="Skill 目录路径"
+                onSubmit={addCustomAgentWithPath}
+                onCancel={() => { setAddingAgent(false); setAddingAgentStep("name"); setAddingAgentName(""); }}
+              />
+            )
+          ) : (
+            <button onClick={() => setAddingAgent(true)}>添加 Agent</button>
+          )}
+        </header>
+        <div className="agent-chips">
+          {settings.customAgents.map((agent) => (
+            <button
+              key={agent.id}
+              className={`agent-chip ${selectedAgentId === agent.id ? "active" : ""} ${!agent.enabled ? "disabled" : ""}`}
+              onClick={() => setSelectedAgentId(selectedAgentId === agent.id ? null : agent.id)}
+              title={agent.name}
+            >
+              <AgentIcon icon={agent.icon || ""} size={18} />
+              <span>{agent.name}</span>
+            </button>
+          ))}
+        </div>
+        {selectedAgent && (
+          <div className="agent-detail">
+            <div className="agent-detail-header">
+              <label className="toggle-row">
+                <input type="checkbox" checked={selectedAgent.enabled} onChange={(event) => updateAgentConfig(selectedAgent.id, { enabled: event.target.checked })} />
+                <span>启用</span>
+              </label>
+              {!selectedAgent.builtin && (
+                <button className="remove-btn" onClick={() => removeCustomAgent(selectedAgent.id)}>移除</button>
+              )}
+            </div>
+            <div className="agent-detail-paths">
+              <label>Skill 目录路径（每行一个，支持 ~）</label>
+              <textarea
+                value={selectedAgent.paths.join("\n")}
+                onChange={(event) => updateAgentConfig(selectedAgent.id, { paths: event.target.value.split(/\r?\n/).map((path) => path.trim()).filter(Boolean) })}
+                rows={Math.max(2, Math.min(4, selectedAgent.paths.length))}
+              />
+            </div>
+            <div className="agent-detail-categories">
+              <div className="agent-detail-categories-header">
+                <label>Skill 子分类</label>
+                {addingCategoryForAgent === selectedAgent.id ? (
+                  <InlineInput placeholder="分类名称" compact onSubmit={(name) => addCategoryWithName(selectedAgent.id, name)} onCancel={() => setAddingCategoryForAgent(null)} />
+                ) : (
+                  <button className="small-btn" onClick={() => setAddingCategoryForAgent(selectedAgent.id)}>添加分类</button>
+                )}
+              </div>
+              <div className="category-list">
+                {(selectedAgent.categories || []).map((cat) => (
+                  <div key={cat.id} className="category-item">
+                    {editingCategoryId === cat.id ? (
+                      <>
+                        <input
+                          className="tag-edit-input"
+                          value={editingCategoryName}
+                          onChange={(e) => setEditingCategoryName(e.target.value)}
+                          placeholder="分类名称"
+                        />
+                        <button className="tag-edit-save" onClick={() => saveCategoryEdit(selectedAgent.id)}>保存</button>
+                        <button className="tag-edit-cancel" onClick={() => setEditingCategoryId(null)}>取消</button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="category-name">{cat.name}</span>
+                        <span className="category-count">{cat.skillNames.length} 个 Skill</span>
+                        <button className="tag-edit-btn" onClick={() => startEditCategory(cat)}>编辑</button>
+                        <button className="tag-delete-btn" onClick={() => deleteCategory(selectedAgent.id, cat.id)}>删除</button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </section>
@@ -1109,6 +1727,57 @@ function CustomSelect<T extends string>({ value, options, onChange }: { value: T
         ))}
       </div>
     </div>
+  );
+}
+
+function ShortcutInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  const [display, setDisplay] = useState(value);
+  const ref = useRef<HTMLInputElement>(null);
+
+  function handleKeyDown(event: React.KeyboardEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const parts: string[] = [];
+    if (event.metaKey) parts.push("Cmd");
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+    if (event.shiftKey) parts.push("Shift");
+
+    const key = event.key;
+    if (["Meta", "Control", "Alt", "Shift", "Cmd"].includes(key)) {
+      setDisplay(parts.join("+") || value);
+      return;
+    }
+
+    const shortcut = [...parts, key.length === 1 ? key.toUpperCase() : key].join("+");
+    setDisplay(shortcut);
+    onChange(shortcut);
+    setRecording(false);
+  }
+
+  function handleFocus() {
+    setRecording(true);
+    setDisplay("");
+  }
+
+  function handleBlur() {
+    setRecording(false);
+    setDisplay(value);
+  }
+
+  return (
+    <input
+      ref={ref}
+      className={recording ? "shortcut-input recording" : "shortcut-input"}
+      value={display}
+      readOnly
+      onFocus={handleFocus}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      placeholder="点击后按下组合键"
+    />
   );
 }
 
@@ -1247,6 +1916,48 @@ function MarkdownEditor({ value, onChange, theme }: { value: string; onChange: (
   }, [value]);
 
   return <div className="markdown-editor-host" ref={hostRef} />;
+}
+
+function InlineInput({ placeholder, autoFocus = true, compact = false, wide = false, onSubmit, onCancel }: {
+  placeholder: string;
+  autoFocus?: boolean;
+  compact?: boolean;
+  wide?: boolean;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const ref = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (autoFocus) ref.current?.focus();
+  }, [autoFocus]);
+
+  function handleConfirm() {
+    const trimmed = value.trim();
+    if (trimmed) onSubmit(trimmed);
+    else onCancel();
+  }
+
+  return (
+    <span className={`inline-input-wrap${compact ? " compact" : ""}${wide ? " wide" : ""}`}>
+      <input
+        ref={ref}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={placeholder}
+        className="inline-input-field"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") handleConfirm();
+          if (e.key === "Escape") onCancel();
+        }}
+        onBlur={handleConfirm}
+      />
+      <button className="inline-input-btn" onMouseDown={(e) => { e.preventDefault(); handleConfirm(); }}>
+        <Check size={compact ? 10 : 12} />
+      </button>
+    </span>
+  );
 }
 
 function navClass(active: boolean) {

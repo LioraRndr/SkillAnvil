@@ -55,8 +55,15 @@ export interface Settings {
   theme: Theme;
   shortcut: string;
   minimizeToTray: boolean;
+  customTags: Tag[];
   customAgents: AgentPathConfig[];
   snapshotsEnabled: boolean;
+}
+
+export interface SkillCategory {
+  id: string;
+  name: string;
+  skillNames: string[];
 }
 
 export interface AgentPathConfig {
@@ -66,6 +73,7 @@ export interface AgentPathConfig {
   enabled: boolean;
   builtin: boolean;
   icon?: string | null;
+  categories: SkillCategory[];
 }
 
 export interface SkillFilter {
@@ -73,6 +81,8 @@ export interface SkillFilter {
   query?: string | null;
   starred?: boolean | null;
   tagId?: string | null;
+  categoryId?: string | null;
+  categoryAgentId?: string | null;
 }
 
 export interface ReadFileResult {

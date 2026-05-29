@@ -120,6 +120,16 @@ struct Settings {
     custom_agents: Vec<AgentPathConfig>,
     #[serde(default = "default_true", alias = "snapshots_enabled")]
     snapshots_enabled: bool,
+    #[serde(default = "default_custom_tags", alias = "custom_tags")]
+    custom_tags: Vec<Tag>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillCategory {
+    id: String,
+    name: String,
+    skill_names: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -134,6 +144,8 @@ struct AgentPathConfig {
     builtin: bool,
     #[serde(default)]
     icon: Option<String>,
+    #[serde(default)]
+    categories: Vec<SkillCategory>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -143,6 +155,8 @@ struct SkillFilter {
     query: Option<String>,
     starred: Option<bool>,
     tag_id: Option<String>,
+    category_id: Option<String>,
+    category_agent_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1096,16 +1110,20 @@ fn normalize_settings(mut settings: Settings) -> Settings {
         settings.custom_agents = default_agent_configs();
         return settings;
     }
-    let mut merged = default_agent_configs();
+    let defaults = default_agent_configs();
+    let default_ids: std::collections::HashSet<String> = defaults.iter().map(|a| a.id.clone()).collect();
+    let mut merged = defaults;
     for existing in settings.custom_agents {
         if let Some(target) = merged.iter_mut().find(|agent| agent.id == existing.id) {
             target.name = existing.name;
             target.paths = existing.paths;
             target.enabled = existing.enabled;
             target.icon = existing.icon.or_else(|| target.icon.clone());
-        } else {
+        } else if !default_ids.contains(&existing.id) && !existing.builtin {
+            // Keep custom (non-builtin) agents that are not in defaults
             merged.push(existing);
         }
+        // Skip removed builtin agents
     }
     settings.custom_agents = merged;
     settings
@@ -1119,7 +1137,16 @@ fn default_settings() -> Settings {
         minimize_to_tray: true,
         custom_agents: default_agent_configs(),
         snapshots_enabled: true,
+        custom_tags: default_custom_tags(),
     }
+}
+
+fn default_custom_tags() -> Vec<Tag> {
+    vec![
+        Tag { id: "writing".into(), name: "写作".into(), color: "#7dd3fc".into() },
+        Tag { id: "coding".into(), name: "开发".into(), color: "#86efac".into() },
+        Tag { id: "review".into(), name: "审查".into(), color: "#fcd34d".into() },
+    ]
 }
 
 fn default_language() -> String {
@@ -1184,7 +1211,6 @@ fn default_agent_configs() -> Vec<AgentPathConfig> {
             false,
             "openclaw",
         ),
-        builtin_agent("droid", "Droid", &["~/.droid/skills"], false, "droid"),
         builtin_agent("trae-ide", "TRAE IDE", &["~/.trae/skills"], false, "trae"),
         builtin_agent("cline", "Cline", &["~/.cline/skills"], false, "cline"),
         builtin_agent(
@@ -1201,32 +1227,7 @@ fn default_agent_configs() -> Vec<AgentPathConfig> {
             false,
             "codebuddy",
         ),
-        builtin_agent(
-            "command-code",
-            "Command Code",
-            &["~/.command-code/skills"],
-            false,
-            "command",
-        ),
-        builtin_agent(
-            "continue",
-            "Continue",
-            &["~/.continue/skills"],
-            false,
-            "continue",
-        ),
-        builtin_agent("crush", "Crush", &["~/.crush/skills"], false, "crush"),
         builtin_agent("junie", "Junie", &["~/.junie/skills"], false, "junie"),
-        builtin_agent("kode", "Kode", &["~/.kode/skills"], false, "kode"),
-        builtin_agent("mcpjam", "MCPJam", &["~/.mcpjam/skills"], false, "mcpjam"),
-        builtin_agent("mux", "Mux", &["~/.mux/skills"], false, "mux"),
-        builtin_agent(
-            "neovate",
-            "Neovate",
-            &["~/.neovate/skills"],
-            false,
-            "neovate",
-        ),
         builtin_agent(
             "openhands",
             "OpenHands",
@@ -1234,16 +1235,7 @@ fn default_agent_configs() -> Vec<AgentPathConfig> {
             false,
             "openhands",
         ),
-        builtin_agent("pi", "Pi", &["~/.pi/skills"], false, "pi"),
-        builtin_agent("pochi", "Pochi", &["~/.pochi/skills"], false, "pochi"),
         builtin_agent("qoder", "Qoder", &["~/.qoder/skills"], false, "qoder"),
-        builtin_agent(
-            "qwen-code",
-            "Qwen Code",
-            &["~/.qwen-code/skills", "~/.qwen/skills"],
-            false,
-            "qwen",
-        ),
         builtin_agent(
             "zencoder",
             "Zencoder",
@@ -1275,6 +1267,7 @@ fn builtin_agent(
         enabled,
         builtin: true,
         icon: Some(icon.into()),
+        categories: vec![],
     }
 }
 
