@@ -309,10 +309,12 @@ button {
 }
 
 .section-title .add-btn {
-  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 4px;
   min-height: 18px;
-  font-size: 14px;
-  font-weight: 400;
+  color: var(--muted);
   opacity: 0.6;
 }
 
@@ -336,8 +338,19 @@ button {
 
 .sidebar-tag-item > .inline-input-wrap,
 .sidebar-category-item > .inline-input-wrap {
-  position: absolute;
-  right: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Utility buttons living inside .nav-section must not inherit the
+   full-width nav-button layout (.nav-section button wins on specificity). */
+.nav-section .inline-input-btn {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.nav-section .inline-input-field {
+  min-height: 26px;
 }
 
 .sidebar-item-actions {
@@ -352,20 +365,42 @@ button {
   display: flex;
 }
 
-.sidebar-item-actions .icon-btn {
-  padding: 2px;
+.sidebar-item-actions .icon-btn,
+.sidebar-confirm .icon-btn {
+  width: auto;
+  min-width: auto;
+  padding: 3px;
   min-height: auto;
   border: none;
   background: transparent;
   color: var(--muted);
 }
 
-.sidebar-item-actions .icon-btn:hover {
+.sidebar-item-actions .icon-btn:hover,
+.sidebar-confirm .icon-btn:hover {
   color: var(--text);
 }
 
-.sidebar-item-actions .icon-btn.danger:hover {
+.sidebar-item-actions .icon-btn.danger:hover,
+.sidebar-confirm .icon-btn.danger:hover {
   color: #e55;
+}
+
+.sidebar-confirm {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  position: absolute;
+  right: 4px;
+  padding-left: 8px;
+  background: var(--sidebar);
+  box-shadow: -8px 0 8px -4px var(--sidebar);
+}
+
+.sidebar-confirm-label {
+  font-size: 11px;
+  color: var(--danger);
+  white-space: nowrap;
 }
 
 .agent-nav-row {
@@ -375,14 +410,16 @@ button {
 }
 
 .agent-nav-row > button:first-child {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
-  margin-right: auto;
 }
 
-.agent-nav-row > .inline-input-wrap,
-.agent-nav-row > .add-category-icon {
-  flex: 0 0 auto;
+.agent-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-nav-row > button:first-child .nav-count {
@@ -393,16 +430,15 @@ button {
   opacity: 0;
 }
 
-.add-category-icon {
+.agent-nav-row > .add-category-icon {
   flex: 0 0 auto;
-  padding: 4px 8px;
+  width: auto;
+  min-width: 26px;
   min-height: 24px;
-  min-width: 28px;
+  padding: 4px 6px;
   border: none;
   background: transparent;
   color: var(--accent);
-  font-size: 16px;
-  font-weight: 400;
   line-height: 1;
   opacity: 0;
   transition: opacity 0.15s;
@@ -413,7 +449,7 @@ button {
   opacity: 1;
 }
 
-.add-category-icon:hover {
+.agent-nav-row > .add-category-icon:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.1);
   border-radius: 4px;

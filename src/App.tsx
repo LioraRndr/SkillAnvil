@@ -18,6 +18,7 @@ import {
   History,
   Languages,
   List,
+  Plus,
   RefreshCcw,
   RotateCcw,
   Save,
@@ -156,10 +157,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const saveTimer = useRef<number | null>(null);
-  const [addingCategoryForAgent, setAddingCategoryForAgent] = useState<string | null>(null);
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
-  const [addingTag, setAddingTag] = useState(false);
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
+  const [confirmDeleteCategoryId, setConfirmDeleteCategoryId] = useState<string | null>(null);
+  const [confirmDeleteTagId, setConfirmDeleteTagId] = useState<string | null>(null);
   const [cloningSkill, setCloningSkill] = useState<Skill | null>(null);
 
   function showToast(message: string, type: ToastType = "success") {
@@ -725,58 +726,25 @@ export default function App() {
                     setPane("skills");
                     setFilter(newFilter);
                   }}>
-                    <AgentIcon icon={agent.icon || ""} size={16} /> {agent.name}
+                    <AgentIcon icon={agent.icon || ""} size={16} /> <span className="agent-name">{agent.name}</span>
                     <span className="nav-count">{new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}</span>
                   </button>
-                  {addingCategoryForAgent === agent.id ? (
-                    <InlineInput
-                      placeholder="分类名称"
-                      compact
-                      onSubmit={(name) => {
-                        const newCat = { id: `cat-${crypto.randomUUID().slice(0, 8)}`, name, skillNames: [] as string[] };
-                        const newCats = [...(agentConfig?.categories ?? []), newCat];
-                        updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
-                        setAddingCategoryForAgent(null);
-                      }}
-                      onCancel={() => setAddingCategoryForAgent(null)}
-                    />
-                  ) : (
-                    <button className="add-category-icon" onClick={(e) => {
-                      e.stopPropagation();
-                      setAddingCategoryForAgent(agent.id);
-                    }} title="添加分类">+</button>
-                  )}
+                  <button className="add-category-icon" onClick={(e) => {
+                    e.stopPropagation();
+                    const newCat = { id: `cat-${crypto.randomUUID().slice(0, 8)}`, name: nextDefaultName(agentConfig?.categories ?? [], "新分类"), skillNames: [] as string[] };
+                    const newCats = [...(agentConfig?.categories ?? []), newCat];
+                    updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                    setEditingCategoryId(newCat.id);
+                    setConfirmDeleteCategoryId(null);
+                  }} title="添加子分类"><Plus size={14} /></button>
                 </div>
                 <div className="agent-categories">
                   {categories.map((cat) => (
                     <div key={cat.id} className="sidebar-category-item">
-                      <button
-                        className={navClass(activeTabIndex < 0 && filter.categoryId === cat.id && filter.categoryAgentId === agent.id)}
-                        onClick={() => {
-                          const newFilter = { agentId: agent.id, categoryId: cat.id, categoryAgentId: agent.id };
-                          if (activeTabIndex >= 0) {
-                            const currentTab = tabs[activeTabIndex];
-                            if (currentTab) {
-                              const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
-                              tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
-                            }
-                            setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
-                            setPendingScrollY(0);
-                          } else {
-                            setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
-                          }
-                          setActiveTabIndex(-1);
-                          setPane("skills");
-                          setFilter(newFilter);
-                        }}
-                      >
-                        <span className="category-dot" />{cat.name}
-                        <span className="nav-count">{cat.skillNames.length}</span>
-                      </button>
                       {editingCategoryId === cat.id ? (
                         <InlineInput
                           placeholder="分类名称"
-                          compact
+                          initialValue={cat.name}
                           onSubmit={(name) => {
                             const newCats = (agentConfig?.categories ?? []).map((c) => c.id === cat.id ? { ...c, name } : c);
                             updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
@@ -785,17 +753,58 @@ export default function App() {
                           onCancel={() => setEditingCategoryId(null)}
                         />
                       ) : (
-                        <div className="sidebar-item-actions">
-                          <button className="icon-btn" onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingCategoryId(cat.id);
-                          }} title="编辑"><SettingsIcon size={10} /></button>
-                          <button className="icon-btn danger" onClick={(e) => {
-                            e.stopPropagation();
-                            const newCats = (agentConfig?.categories ?? []).filter((c) => c.id !== cat.id);
-                            updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
-                          }} title="删除"><X size={10} /></button>
-                        </div>
+                        <>
+                          <button
+                            className={navClass(activeTabIndex < 0 && filter.categoryId === cat.id && filter.categoryAgentId === agent.id)}
+                            onClick={() => {
+                              const newFilter = { agentId: agent.id, categoryId: cat.id, categoryAgentId: agent.id };
+                              if (activeTabIndex >= 0) {
+                                const currentTab = tabs[activeTabIndex];
+                                if (currentTab) {
+                                  const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                                  tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+                                }
+                                setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+                                setPendingScrollY(0);
+                              } else {
+                                setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+                              }
+                              setActiveTabIndex(-1);
+                              setPane("skills");
+                              setFilter(newFilter);
+                            }}
+                          >
+                            <span className="category-dot" /><span className="agent-name">{cat.name}</span>
+                            <span className="nav-count">{cat.skillNames.length}</span>
+                          </button>
+                          {confirmDeleteCategoryId === cat.id ? (
+                            <div className="sidebar-confirm">
+                              <span className="sidebar-confirm-label">删除?</span>
+                              <button className="icon-btn danger" onClick={(e) => {
+                                e.stopPropagation();
+                                const newCats = (agentConfig?.categories ?? []).filter((c) => c.id !== cat.id);
+                                updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                                setConfirmDeleteCategoryId(null);
+                              }} title="确认删除"><Check size={12} /></button>
+                              <button className="icon-btn" onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDeleteCategoryId(null);
+                              }} title="取消"><X size={12} /></button>
+                            </div>
+                          ) : (
+                            <div className="sidebar-item-actions">
+                              <button className="icon-btn" onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDeleteCategoryId(null);
+                                setEditingCategoryId(cat.id);
+                              }} title="重命名"><SettingsIcon size={12} /></button>
+                              <button className="icon-btn danger" onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDeleteCategoryId(cat.id);
+                              }} title="删除"><Trash2 size={12} /></button>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                   ))}
@@ -807,48 +816,22 @@ export default function App() {
 
         <div className="section-title">
           <span>标签</span>
-          {addingTag ? (
-            <InlineInput
-              placeholder="标签名称"
-              compact
-              onSubmit={(name) => {
-                const colors = ["#7dd3fc", "#86efac", "#fcd34d", "#fca5a5", "#c4b5fd", "#fdba74", "#a5b4fc"];
-                const color = colors[settings.customTags.length % colors.length];
-                updateSettings({ ...settings, customTags: [...settings.customTags, { id: `tag-${crypto.randomUUID().slice(0, 8)}`, name, color }] });
-                setAddingTag(false);
-              }}
-              onCancel={() => setAddingTag(false)}
-            />
-          ) : (
-            <button className="add-btn" onClick={() => setAddingTag(true)}>+</button>
-          )}
+          <button className="add-btn" onClick={() => {
+            const colors = ["#7dd3fc", "#86efac", "#fcd34d", "#fca5a5", "#c4b5fd", "#fdba74", "#a5b4fc"];
+            const color = colors[settings.customTags.length % colors.length];
+            const newTag = { id: `tag-${crypto.randomUUID().slice(0, 8)}`, name: nextDefaultName(settings.customTags, "新标签"), color };
+            updateSettings({ ...settings, customTags: [...settings.customTags, newTag] });
+            setEditingTagId(newTag.id);
+            setConfirmDeleteTagId(null);
+          }} title="添加标签"><Plus size={14} /></button>
         </div>
         <nav className="nav-section">
           {settings.customTags.map((tag) => (
             <div key={tag.id} className="sidebar-tag-item">
-              <button className={navClass(activeTabIndex < 0 && filter.tagId === tag.id)} onClick={() => {
-                const newFilter = { tagId: tag.id };
-                if (activeTabIndex >= 0) {
-                  const currentTab = tabs[activeTabIndex];
-                  if (currentTab) {
-                    const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
-                    tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
-                  }
-                  setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
-                  setPendingScrollY(0);
-                } else {
-                  setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
-                }
-                setActiveTabIndex(-1);
-                setPane("skills");
-                setFilter(newFilter);
-              }}>
-                <span className="tag-dot" style={{ background: tag.color }} /> {tag.name}
-              </button>
               {editingTagId === tag.id ? (
                 <InlineInput
                   placeholder="标签名称"
-                  compact
+                  initialValue={tag.name}
                   onSubmit={(name) => {
                     updateSettings({ ...settings, customTags: settings.customTags.map((t) => t.id === tag.id ? { ...t, name } : t) });
                     setEditingTagId(null);
@@ -856,16 +839,53 @@ export default function App() {
                   onCancel={() => setEditingTagId(null)}
                 />
               ) : (
-                <div className="sidebar-item-actions">
-                  <button className="icon-btn" onClick={(e) => {
-                    e.stopPropagation();
-                    setEditingTagId(tag.id);
-                  }} title="编辑"><SettingsIcon size={12} /></button>
-                  <button className="icon-btn danger" onClick={(e) => {
-                    e.stopPropagation();
-                    updateSettings({ ...settings, customTags: settings.customTags.filter((t) => t.id !== tag.id) });
-                  }} title="删除"><X size={12} /></button>
-                </div>
+                <>
+                  <button className={navClass(activeTabIndex < 0 && filter.tagId === tag.id)} onClick={() => {
+                    const newFilter = { tagId: tag.id };
+                    if (activeTabIndex >= 0) {
+                      const currentTab = tabs[activeTabIndex];
+                      if (currentTab) {
+                        const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                        tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
+                      }
+                      setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+                      setPendingScrollY(0);
+                    } else {
+                      setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+                    }
+                    setActiveTabIndex(-1);
+                    setPane("skills");
+                    setFilter(newFilter);
+                  }}>
+                    <span className="tag-dot" style={{ background: tag.color }} /> <span className="agent-name">{tag.name}</span>
+                  </button>
+                  {confirmDeleteTagId === tag.id ? (
+                    <div className="sidebar-confirm">
+                      <span className="sidebar-confirm-label">删除?</span>
+                      <button className="icon-btn danger" onClick={(e) => {
+                        e.stopPropagation();
+                        updateSettings({ ...settings, customTags: settings.customTags.filter((t) => t.id !== tag.id) });
+                        setConfirmDeleteTagId(null);
+                      }} title="确认删除"><Check size={12} /></button>
+                      <button className="icon-btn" onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDeleteTagId(null);
+                      }} title="取消"><X size={12} /></button>
+                    </div>
+                  ) : (
+                    <div className="sidebar-item-actions">
+                      <button className="icon-btn" onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDeleteTagId(null);
+                        setEditingTagId(tag.id);
+                      }} title="重命名"><SettingsIcon size={12} /></button>
+                      <button className="icon-btn danger" onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDeleteTagId(tag.id);
+                      }} title="删除"><Trash2 size={12} /></button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ))}
@@ -1918,19 +1938,23 @@ function MarkdownEditor({ value, onChange, theme }: { value: string; onChange: (
   return <div className="markdown-editor-host" ref={hostRef} />;
 }
 
-function InlineInput({ placeholder, autoFocus = true, compact = false, wide = false, onSubmit, onCancel }: {
+function InlineInput({ placeholder, autoFocus = true, compact = false, wide = false, initialValue = "", onSubmit, onCancel }: {
   placeholder: string;
   autoFocus?: boolean;
   compact?: boolean;
   wide?: boolean;
+  initialValue?: string;
   onSubmit: (value: string) => void;
   onCancel: () => void;
 }) {
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(initialValue);
   const ref = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (autoFocus) ref.current?.focus();
+    if (autoFocus) {
+      ref.current?.focus();
+      ref.current?.select();
+    }
   }, [autoFocus]);
 
   function handleConfirm() {
@@ -1962,6 +1986,14 @@ function InlineInput({ placeholder, autoFocus = true, compact = false, wide = fa
 
 function navClass(active: boolean) {
   return active ? "active" : "";
+}
+
+function nextDefaultName(existing: { name: string }[], base: string) {
+  const names = new Set(existing.map((item) => item.name));
+  if (!names.has(base)) return base;
+  let i = 2;
+  while (names.has(`${base} ${i}`)) i++;
+  return `${base} ${i}`;
 }
 
 function agentName(agents: Agent[], agentId: string) {
