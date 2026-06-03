@@ -13,29 +13,58 @@ SkillAnvil is a Tauri 2 desktop workbench for managing local Coding Agent Skill 
 
 Install JavaScript dependencies:
 
-```powershell
+```sh
 pnpm install
 ```
 
 Run frontend checks:
 
-```powershell
+```sh
 pnpm typecheck
 pnpm build
 ```
 
-Run the desktop app after Rust and Visual Studio C++ Build Tools are available:
+Run the desktop app after the native toolchain for your OS is available:
 
-```powershell
+```sh
 pnpm dev
 ```
 
-On Windows, `pnpm dev` automatically loads Visual Studio Build Tools and adds Rustup's Cargo directory to `PATH`.
+On macOS and Linux, `pnpm dev` runs `pnpm tauri dev` directly and automatically adds `~/.cargo/bin` to `PATH` when that directory exists.
+
+On Windows, `pnpm dev` delegates to `scripts\dev.cmd`, which automatically loads Visual Studio Build Tools and adds Rustup's Cargo directory to `PATH`.
 
 Run the full local check:
 
-```powershell
+```sh
 pnpm check:desktop
+```
+
+## macOS Native Toolchain
+
+Install:
+
+- Xcode Command Line Tools: `xcode-select --install`
+- Rust through Rustup
+- pnpm, or enable it through Corepack
+
+Then run:
+
+```sh
+pnpm install
+pnpm dev
+```
+
+Build the macOS app bundle with:
+
+```sh
+pnpm build:desktop
+```
+
+Build a distributable DMG from a normal macOS desktop session with:
+
+```sh
+pnpm build:desktop:dmg
 ```
 
 ## Windows Native Toolchain
