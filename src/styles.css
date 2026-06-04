@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: "Instrument Serif";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/InstrumentSerif-Regular.woff2") format("woff2");
+}
+
 :root {
   color: #d9d6ca;
   background: #22231f;
@@ -723,6 +731,7 @@ button {
   min-height: 158px;
   padding: 14px;
   overflow: hidden;
+  cursor: pointer;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
@@ -796,10 +805,11 @@ button {
 .skill-card h2 {
   margin: 0;
   color: var(--text);
-  font-size: 16px;
-  font-weight: 750;
-  letter-spacing: 0;
-  font-family: var(--mono, ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace);
+  font-family: "Instrument Serif", ui-serif, Georgia, serif;
+  font-size: 28px;
+  font-weight: 400;
+  letter-spacing: 0.2px;
+  line-height: 1.1;
 }
 
 .skill-subtitle {
