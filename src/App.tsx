@@ -1294,7 +1294,12 @@ function SkillCard({
           <Star size={17} />
         </button>
       </div>
-      <h2>{skill.displayName}</h2>
+      <div className="card-title">
+        <h2>{skill.name}</h2>
+        {skill.displayName && skill.displayName !== skill.name && (
+          <span className="skill-subtitle">{skill.displayName}</span>
+        )}
+      </div>
       <p>{skill.description || "未提供描述"}</p>
       <AgentPresence agentIds={agentIds} agents={agents} />
       <div className="tag-row">
