@@ -659,11 +659,13 @@ export default function App() {
   }, [activeTabIndex, pendingScrollY]);
 
   const themeClass = settings.theme === "light" ? "theme-light" : settings.theme === "system" ? "theme-system" : "theme-dark";
+  const isMacChrome = document.documentElement.classList.contains("is-macos");
   const activeSyncTargets = syncDraft?.targets.filter((target) => target.status !== "same") ?? [];
 
   return (
     <div className={`app-shell ${themeClass}`}>
       <aside className="sidebar">
+        {isMacChrome && <div className="titlebar-drag" data-tauri-drag-region />}
         <div className="brand">
           <div className="brand-mark">
             <Archive size={22} />

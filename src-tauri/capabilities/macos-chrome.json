@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/macOS-schema.json",
+  "identifier": "macos-chrome",
+  "description": "macOS-only window chrome: drag region for the overlay title bar (titleBarStyle: Overlay needs window.startDragging).",
+  "platforms": ["macOS"],
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging"]
+}

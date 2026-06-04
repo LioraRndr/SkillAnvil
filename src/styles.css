@@ -2110,3 +2110,52 @@ input[type="checkbox"]:focus-visible {
   align-items: center;
   gap: 5px;
 }
+
+/* =========================================================================
+   macOS-only chrome (added via .is-macos on <html> from main.tsx)
+   - Native NSVisualEffectView "sidebar" vibrancy shows through the app
+     wherever the DOM is transparent.
+   - Keep the main content + footer opaque so only the sidebar is translucent.
+   - titleBarStyle: Overlay removes the title bar; traffic lights float over
+     the sidebar, so reserve top space and provide a drag region.
+   Windows/Linux never get this class, so their look is unchanged.
+   ========================================================================= */
+html.is-macos,
+html.is-macos body {
+  background: transparent;
+}
+
+.is-macos .app-shell {
+  background: transparent;
+}
+
+/* Main content stays solid — vibrancy only behind the sidebar. */
+.is-macos .app-shell .main {
+  background: var(--bg);
+}
+
+/* Translucent tint layered over the native vibrancy (the OS supplies the blur). */
+.is-macos .app-shell .sidebar {
+  position: relative;
+  padding-top: 52px;
+  background: color-mix(in srgb, var(--sidebar) 40%, transparent);
+}
+
+/* Drop the bottom status bar on macOS and reclaim its grid row. */
+.is-macos .app-shell {
+  grid-template-rows: 1fr;
+}
+
+.is-macos .statusbar {
+  display: none;
+}
+
+/* Draggable strip under the overlaid traffic-light buttons. */
+.titlebar-drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  z-index: 50;
+}
