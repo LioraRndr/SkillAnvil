@@ -1283,18 +1283,23 @@ function SkillCard({
 }) {
   const canSync = agents.length > 1;
   return (
-    <article className="skill-card" onDoubleClick={() => onOpen(skill)} onContextMenu={(e) => onContextMenu(e, skill)}>
+    <article className="skill-card" onClick={() => onOpen(skill)} onContextMenu={(e) => onContextMenu(e, skill)}>
       {update?.hasUpdate && (
         <div className="update-badge" title={`有更新：${update.summary.join(", ")}`}>
           <CloudDownload size={13} /> 更新可用
         </div>
       )}
       <div className="card-head">
-        <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={() => onToggleStar(skill)} title="收藏">
+        <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={(e) => { e.stopPropagation(); onToggleStar(skill); }} title="收藏">
           <Star size={17} />
         </button>
       </div>
-      <h2>{skill.displayName}</h2>
+      <div className="card-title">
+        <h2>{skill.name}</h2>
+        {skill.displayName && skill.displayName !== skill.name && (
+          <span className="skill-subtitle">{skill.displayName}</span>
+        )}
+      </div>
       <p>{skill.description || "未提供描述"}</p>
       <AgentPresence agentIds={agentIds} agents={agents} />
       <div className="tag-row">
@@ -1304,7 +1309,7 @@ function SkillCard({
         <span>v{skill.version || "0.0.0"}</span>
         <div className="card-actions">
           {canSync && <button onClick={(e) => { e.stopPropagation(); onSync(skill); }}>同步</button>}
-          <button onClick={() => onOpen(skill)}>编辑</button>
+          <button onClick={(e) => { e.stopPropagation(); onOpen(skill); }}>编辑</button>
         </div>
       </footer>
     </article>
