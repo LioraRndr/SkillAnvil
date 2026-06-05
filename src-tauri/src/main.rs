@@ -122,6 +122,9 @@ struct Settings {
     snapshots_enabled: bool,
     #[serde(default = "default_custom_tags", alias = "custom_tags")]
     custom_tags: Vec<Tag>,
+    /// Agent id to scope automatic provenance tracing to; None/empty = all agents.
+    #[serde(default, alias = "provenance_agent_id")]
+    provenance_agent_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -178,11 +181,26 @@ struct SyncTargetStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GithubUpdate {
+struct ProvenanceCandidate {
+    repo: String,
     skill_id: String,
-    has_update: bool,
-    latest_commit: Option<String>,
-    summary: Vec<String>,
+    installs: i64,
+    similarity: Option<f64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillProvenance {
+    skill_id: String,
+    /// verified | likely | ambiguous | local | unknown
+    status: String,
+    repo: Option<String>,
+    installs: Option<i64>,
+    /// identical | differs | unknown
+    content_match: Option<String>,
+    candidates: Vec<ProvenanceCandidate>,
+    manual: bool,
+    traced_at: Option<String>,
     error: Option<String>,
 }
 
@@ -244,9 +262,11 @@ fn main() {
             sync_skill,
             trash_skill,
             open_in_file_manager,
+            open_url,
             star_skill,
             set_skill_tags,
-            check_github_updates,
+            get_provenance,
+            trace_skill_provenance,
             get_snapshots,
             restore_snapshot,
             get_settings,
@@ -520,6 +540,14 @@ fn open_in_file_manager(path: String) -> AppResult<()> {
 }
 
 #[tauri::command]
+fn open_url(url: String) -> AppResult<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(AppError::Message("仅支持打开 http(s) 链接。".into()));
+    }
+    open_external_url(&url)
+}
+
+#[tauri::command]
 fn star_skill(state: State<AppState>, skill_id: String, starred: bool) -> AppResult<Skill> {
     let conn = Connection::open(&state.db_path)?;
     conn.execute(
@@ -552,74 +580,312 @@ fn set_skill_tags(state: State<AppState>, skill_id: String, tags: Vec<Tag>) -> A
 }
 
 #[tauri::command]
-async fn check_github_updates(
+fn get_provenance(state: State<AppState>) -> AppResult<Vec<SkillProvenance>> {
+    let conn = Connection::open(&state.db_path)?;
+    load_provenance(&conn)
+}
+
+#[tauri::command]
+async fn trace_skill_provenance(
     state: State<'_, AppState>,
     skill_ids: Vec<String>,
-) -> AppResult<Vec<GithubUpdate>> {
-    let skills = {
+) -> AppResult<Vec<SkillProvenance>> {
+    // Resolve (id, name, local SKILL.md) up front, then release the DB connection.
+    let targets: Vec<(String, String, String)> = {
         let conn = Connection::open(&state.db_path)?;
-        let mut items = Vec::new();
-        for id in skill_ids {
-            items.push(find_skill(&conn, &id)?);
-        }
-        items
+        let all = load_skills(&conn, &SkillFilter::default())?;
+        skill_ids
+            .iter()
+            .filter_map(|id| all.iter().find(|s| &s.id == id))
+            .map(|s| {
+                let local_md = read_text_file(&Path::new(&s.dir_path).join("SKILL.md"))
+                    .map(|f| f.content)
+                    .unwrap_or_default();
+                (s.id.clone(), s.name.clone(), local_md)
+            })
+            .collect()
     };
+
     let client = reqwest::Client::new();
-    let mut updates = Vec::new();
-    for skill in skills {
-        let Some(repo) = skill.github_repo.clone() else {
-            updates.push(GithubUpdate {
-                skill_id: skill.id,
-                has_update: false,
-                latest_commit: None,
-                summary: vec![],
-                error: Some("不是 GitHub 来源 Skill".into()),
-            });
-            continue;
-        };
-        let branch = skill.github_branch.clone().unwrap_or_else(|| "main".into());
-        let url = format!("https://api.github.com/repos/{repo}/commits/{branch}");
-        let response = client
-            .get(url)
-            .header("User-Agent", "SkillAnvil")
-            .send()
-            .await;
-        match response {
-            Ok(res) if res.status().is_success() => {
-                let value: serde_json::Value = res.json().await?;
-                let sha = value["sha"].as_str().map(str::to_string);
-                let message = value["commit"]["message"]
-                    .as_str()
-                    .unwrap_or("")
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                updates.push(GithubUpdate {
-                    skill_id: skill.id,
-                    has_update: sha.is_some() && sha != skill.last_sync_commit,
-                    latest_commit: sha,
-                    summary: vec![message],
-                    error: None,
-                });
-            }
-            Ok(res) => updates.push(GithubUpdate {
-                skill_id: skill.id,
-                has_update: false,
-                latest_commit: None,
-                summary: vec![],
-                error: Some(format!("GitHub API 返回 {}", res.status())),
-            }),
-            Err(err) => updates.push(GithubUpdate {
-                skill_id: skill.id,
-                has_update: false,
-                latest_commit: None,
-                summary: vec![],
-                error: Some(err.to_string()),
-            }),
+    let mut results = Vec::with_capacity(targets.len());
+    let last = targets.len().saturating_sub(1);
+    for (index, (id, name, local_md)) in targets.into_iter().enumerate() {
+        let prov = trace_one_provenance(&client, &id, &name, &local_md).await;
+        // Best-effort persist: a transient DB lock must not abort the whole batch.
+        if let Ok(conn) = Connection::open(&state.db_path) {
+            let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+            let _ = upsert_provenance(&conn, &prov);
+        }
+        results.push(prov);
+        // Be polite to skills.sh between lookups to avoid 429s.
+        if index < last {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
-    Ok(updates)
+    Ok(results)
+}
+
+/// Trace a single skill against the skills.sh registry and (best-effort) the
+/// upstream GitHub content. Network failures degrade gracefully rather than
+/// aborting the whole batch.
+async fn trace_one_provenance(
+    client: &reqwest::Client,
+    id: &str,
+    name: &str,
+    local_md: &str,
+) -> SkillProvenance {
+    let traced_at = Some(now());
+    let candidates = match search_registry(client, name).await {
+        Ok(list) => list,
+        Err(err) => {
+            return SkillProvenance {
+                skill_id: id.to_string(),
+                status: "unknown".into(),
+                repo: None,
+                installs: None,
+                content_match: None,
+                candidates: vec![],
+                manual: false,
+                traced_at,
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    // Keep only exact-name matches, most-installed first.
+    let mut exact: Vec<ProvenanceCandidate> =
+        candidates.into_iter().filter(|c| c.skill_id == name).collect();
+    exact.sort_by(|a, b| b.installs.cmp(&a.installs));
+    exact.truncate(3);
+
+    if exact.is_empty() {
+        return SkillProvenance {
+            skill_id: id.to_string(),
+            status: "local".into(),
+            repo: None,
+            installs: None,
+            content_match: None,
+            candidates: vec![],
+            manual: false,
+            traced_at,
+            error: None,
+        };
+    }
+
+    // Content-compare the top few candidates (most-installed first) and keep the
+    // best match — a skill may originate from a repo that isn't the most popular.
+    let mut best_idx: Option<usize> = None;
+    let mut best_sim = 0.0_f64;
+    if !local_md.is_empty() {
+        let compare_n = exact.len().min(3);
+        for i in 0..compare_n {
+            if let Some(remote) = fetch_upstream_skill_md(client, &exact[i].repo, name).await {
+                let sim = line_similarity(local_md, &remote);
+                exact[i].similarity = Some(sim);
+                if sim > best_sim {
+                    best_sim = sim;
+                    best_idx = Some(i);
+                }
+                if sim >= 0.999 {
+                    break; // identical — no need to inspect the rest
+                }
+            }
+        }
+    }
+
+    let verified = best_idx.is_some() && best_sim >= 0.6;
+    let top_repo = exact[0].repo.clone();
+    let top_installs = exact[0].installs;
+    // A single candidate, or one that dwarfs the runner-up, is a confident
+    // (if content-unconfirmed) source; close competitors stay ambiguous.
+    let dominant = exact
+        .get(1)
+        .map(|second| top_installs >= second.installs.saturating_mul(4))
+        .unwrap_or(true);
+
+    let (status, repo, installs, content_match) = if verified {
+        let best = &exact[best_idx.unwrap()];
+        let label = if best_sim >= 0.999 { "identical" } else { "differs" };
+        ("verified".to_string(), best.repo.clone(), best.installs, Some(label.to_string()))
+    } else if dominant {
+        ("likely".to_string(), top_repo, top_installs, None)
+    } else {
+        ("ambiguous".to_string(), top_repo, top_installs, None)
+    };
+
+    SkillProvenance {
+        skill_id: id.to_string(),
+        status,
+        repo: Some(repo),
+        installs: Some(installs),
+        content_match,
+        candidates: exact,
+        manual: false,
+        traced_at,
+        error: None,
+    }
+}
+
+async fn search_registry(
+    client: &reqwest::Client,
+    name: &str,
+) -> AppResult<Vec<ProvenanceCandidate>> {
+    // skills.sh throttles bursts (HTTP 429 with a `Retry-After` seconds header).
+    // Honor it: wait the advertised cooldown and retry a few times.
+    let mut attempt = 0;
+    let res = loop {
+        let res = client
+            .get("https://www.skills.sh/api/search")
+            .query(&[("q", name)])
+            .header("User-Agent", "SkillAnvil")
+            .send()
+            .await?;
+        if res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < 4 {
+            attempt += 1;
+            let wait = res
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(5)
+                .clamp(1, 65);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            continue;
+        }
+        break res;
+    };
+    if !res.status().is_success() {
+        return Err(AppError::Message(format!("skills.sh 返回 {}", res.status())));
+    }
+    let value: serde_json::Value = res.json().await?;
+    let mut out = Vec::new();
+    if let Some(arr) = value["skills"].as_array() {
+        for item in arr {
+            let repo = item["source"].as_str().unwrap_or("").to_string();
+            let skill_id = item["skillId"].as_str().unwrap_or("").to_string();
+            let installs = item["installs"].as_i64().unwrap_or(0);
+            if repo.is_empty() || skill_id.is_empty() {
+                continue;
+            }
+            out.push(ProvenanceCandidate {
+                repo,
+                skill_id,
+                installs,
+                similarity: None,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Best-effort fetch of an upstream SKILL.md from raw.githubusercontent.com.
+/// `repo` is `owner/repo`; registry hosts without a slash (e.g. `smithery.ai`)
+/// are not on GitHub and are skipped.
+async fn fetch_upstream_skill_md(
+    client: &reqwest::Client,
+    repo: &str,
+    name: &str,
+) -> Option<String> {
+    if repo.split('/').count() != 2 {
+        return None;
+    }
+    let rel_paths = [
+        format!("skills/{name}/SKILL.md"),
+        format!("{name}/SKILL.md"),
+        "SKILL.md".to_string(),
+        format!(".claude/skills/{name}/SKILL.md"),
+    ];
+    for rel in &rel_paths {
+        let url = format!("https://raw.githubusercontent.com/{repo}/HEAD/{rel}");
+        if let Ok(res) = client.get(&url).header("User-Agent", "SkillAnvil").send().await {
+            if res.status().is_success() {
+                if let Ok(text) = res.text().await {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Line-level similarity in [0, 1]: shared non-empty lines over the longer side.
+fn line_similarity(a: &str, b: &str) -> f64 {
+    let norm = |s: &str| -> Vec<String> {
+        s.replace("\r\n", "\n")
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
+    let la = norm(a);
+    let lb = norm(b);
+    if la.is_empty() || lb.is_empty() {
+        return 0.0;
+    }
+    let mut counts: BTreeMap<&str, i32> = BTreeMap::new();
+    for l in &lb {
+        *counts.entry(l.as_str()).or_insert(0) += 1;
+    }
+    let mut common = 0usize;
+    for l in &la {
+        if let Some(c) = counts.get_mut(l.as_str()) {
+            if *c > 0 {
+                *c -= 1;
+                common += 1;
+            }
+        }
+    }
+    common as f64 / la.len().max(lb.len()) as f64
+}
+
+fn load_provenance(conn: &Connection) -> AppResult<Vec<SkillProvenance>> {
+    let mut stmt = conn.prepare(
+        "select skill_id, status, repo, installs, content_match, candidates, manual, traced_at, error
+         from skill_provenance",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let candidates_json: String = row.get(5)?;
+        Ok(SkillProvenance {
+            skill_id: row.get(0)?,
+            status: row.get(1)?,
+            repo: row.get(2)?,
+            installs: row.get(3)?,
+            content_match: row.get(4)?,
+            candidates: serde_json::from_str(&candidates_json).unwrap_or_default(),
+            manual: row.get::<_, i64>(6)? == 1,
+            traced_at: row.get(7)?,
+            error: row.get(8)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+fn upsert_provenance(conn: &Connection, p: &SkillProvenance) -> AppResult<()> {
+    conn.execute(
+        "insert into skill_provenance(skill_id, status, repo, installs, content_match, candidates, manual, traced_at, error)
+         values(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         on conflict(skill_id) do update set
+            status = excluded.status,
+            repo = excluded.repo,
+            installs = excluded.installs,
+            content_match = excluded.content_match,
+            candidates = excluded.candidates,
+            manual = excluded.manual,
+            traced_at = excluded.traced_at,
+            error = excluded.error",
+        params![
+            p.skill_id,
+            p.status,
+            p.repo,
+            p.installs,
+            p.content_match,
+            serde_json::to_string(&p.candidates)?,
+            p.manual as i64,
+            p.traced_at,
+            p.error
+        ],
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -742,6 +1008,9 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
 
 fn init_db(path: &Path) -> AppResult<()> {
     let conn = Connection::open(path)?;
+    // WAL lets short-lived reader/writer connections coexist without blocking,
+    // which matters while background provenance tracing writes during reads.
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
     conn.execute_batch(
         r#"
         create table if not exists agents(
@@ -796,6 +1065,17 @@ fn init_db(path: &Path) -> AppResult<()> {
         create table if not exists settings(
             key text primary key,
             value text not null
+        );
+        create table if not exists skill_provenance(
+            skill_id text primary key,
+            status text not null,
+            repo text,
+            installs integer,
+            content_match text,
+            candidates text not null default '[]',
+            manual integer not null default 0,
+            traced_at text,
+            error text
         );
         "#,
     )?;
@@ -1138,6 +1418,7 @@ fn default_settings() -> Settings {
         custom_agents: default_agent_configs(),
         snapshots_enabled: true,
         custom_tags: default_custom_tags(),
+        provenance_agent_id: None,
     }
 }
 
@@ -1578,6 +1859,32 @@ fn show_path_in_file_manager(path: &Path) -> AppResult<()> {
         }
         return Ok(());
     }
+}
+
+fn open_external_url(url: &str) -> AppResult<()> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut c = Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    let status = command.status()?;
+    if !status.success() {
+        return Err(AppError::Message("无法打开链接。".into()));
+    }
+    Ok(())
 }
 
 fn hash_dir(path: &Path) -> AppResult<String> {

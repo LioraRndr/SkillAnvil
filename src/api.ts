@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent,
-  GithubUpdate,
   ReadFileResult,
   ScanIssue,
   Settings,
   Skill,
   SkillFilter,
+  SkillProvenance,
   Snapshot,
   SyncTargetStatus,
   Tag
@@ -35,9 +35,11 @@ export const api = {
     call<Skill[]>("sync_skill", { skillId, targetAgentIds }),
   trashSkill: (skillId: string, agentIds: string[]) => call<void>("trash_skill", { skillId, agentIds }),
   openInFileManager: (path: string) => call<void>("open_in_file_manager", { path }),
+  openUrl: (url: string) => call<void>("open_url", { url }),
   starSkill: (skillId: string, starred: boolean) => call<Skill>("star_skill", { skillId, starred }),
   setSkillTags: (skillId: string, tags: Tag[]) => call<Skill>("set_skill_tags", { skillId, tags }),
-  checkGithubUpdates: (skillIds: string[]) => call<GithubUpdate[]>("check_github_updates", { skillIds }),
+  getProvenance: () => call<SkillProvenance[]>("get_provenance"),
+  traceProvenance: (skillIds: string[]) => call<SkillProvenance[]>("trace_skill_provenance", { skillIds }),
   getSnapshots: (skillId: string) => call<Snapshot[]>("get_snapshots", { skillId }),
   restoreSnapshot: (snapshotId: string) => call<ReadFileResult>("restore_snapshot", { snapshotId }),
   getSettings: () => call<Settings>("get_settings"),

@@ -58,6 +58,7 @@ export interface Settings {
   customTags: Tag[];
   customAgents: AgentPathConfig[];
   snapshotsEnabled: boolean;
+  provenanceAgentId?: string | null;
 }
 
 export interface SkillCategory {
@@ -98,15 +99,29 @@ export interface SyncTargetStatus {
   status: "same" | "different" | "missing";
 }
 
-export interface GithubUpdate {
-  skillId: string;
-  hasUpdate: boolean;
-  latestCommit?: string | null;
-  summary: string[];
-  error?: string | null;
-}
-
 export interface ScanIssue {
   path: string;
   message: string;
+}
+
+export type ProvenanceStatus = "verified" | "likely" | "ambiguous" | "local" | "unknown";
+export type ProvenanceContentMatch = "identical" | "differs" | "unknown";
+
+export interface ProvenanceCandidate {
+  repo: string;
+  skillId: string;
+  installs: number;
+  similarity?: number | null;
+}
+
+export interface SkillProvenance {
+  skillId: string;
+  status: ProvenanceStatus;
+  repo?: string | null;
+  installs?: number | null;
+  contentMatch?: ProvenanceContentMatch | null;
+  candidates: ProvenanceCandidate[];
+  manual: boolean;
+  tracedAt?: string | null;
+  error?: string | null;
 }
