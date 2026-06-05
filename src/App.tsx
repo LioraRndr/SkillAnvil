@@ -21,7 +21,6 @@ import {
   Home,
   Grid2X2,
   History,
-  Languages,
   Laptop,
   List,
   Plus,
@@ -128,7 +127,6 @@ const defaultTags: Tag[] = [
 ];
 
 const defaultSettings: Settings = {
-  language: "zh-CN",
   theme: "dark",
   shortcut: navigator.platform.toLowerCase().includes("mac") ? "Cmd+Shift+K" : "Ctrl+Shift+K",
   minimizeToTray: true,
@@ -2305,17 +2303,6 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
 
   return (
     <section className="settings-panel">
-      <div className="setting-row">
-        <div className="setting-copy"><Languages size={18} /><strong>界面语言</strong><span>默认跟随系统，当前可手动切换。</span></div>
-        <CustomSelect
-          value={settings.language}
-          options={[
-            { value: "zh-CN", label: "中文" },
-            { value: "en-US", label: "English" }
-          ]}
-          onChange={(language) => onChange({ ...settings, language })}
-        />
-      </div>
       <div className="setting-row">
         <div className="setting-copy"><SettingsIcon size={18} /><strong>主题</strong><span>编辑器配色将随主题调整。</span></div>
         <CustomSelect

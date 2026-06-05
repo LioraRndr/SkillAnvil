@@ -1,4 +1,3 @@
-export type Language = "zh-CN" | "en-US";
 export type Theme = "dark" | "light" | "system";
 export type SkillSource = "local" | "github";
 
@@ -51,7 +50,6 @@ export interface Snapshot {
 }
 
 export interface Settings {
-  language: Language;
   theme: Theme;
   shortcut: string;
   minimizeToTray: boolean;

@@ -108,8 +108,6 @@ struct Snapshot {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Settings {
-    #[serde(default = "default_language")]
-    language: String,
     #[serde(default = "default_theme")]
     theme: String,
     #[serde(default = "default_shortcut")]
@@ -1411,7 +1409,6 @@ fn normalize_settings(mut settings: Settings) -> Settings {
 
 fn default_settings() -> Settings {
     Settings {
-        language: default_language(),
         theme: default_theme(),
         shortcut: default_shortcut(),
         minimize_to_tray: true,
@@ -1428,10 +1425,6 @@ fn default_custom_tags() -> Vec<Tag> {
         Tag { id: "coding".into(), name: "开发".into(), color: "#86efac".into() },
         Tag { id: "review".into(), name: "审查".into(), color: "#fcd34d".into() },
     ]
-}
-
-fn default_language() -> String {
-    "zh-CN".into()
 }
 
 fn default_theme() -> String {
