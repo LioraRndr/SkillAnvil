@@ -4,19 +4,25 @@ import { ink } from "ink-mde";
 import type { Instance } from "ink-mde";
 import {
   Archive,
+  AlertTriangle,
+  BadgeCheck,
   Check,
   ChevronDown,
   ChevronRight,
   ChevronsUpDown,
-  CloudDownload,
   Copy,
   FileText,
   FolderOpen,
   GitCompare,
+  ChevronLeft,
+  Folder,
+  Github,
+  HelpCircle,
   Home,
   Grid2X2,
   History,
   Languages,
+  Laptop,
   List,
   Plus,
   RefreshCcw,
@@ -83,7 +89,7 @@ function AgentIcon({ icon, size = 16 }: { icon: string; size?: number }) {
   return <FolderOpen size={size} />;
 }
 import { api } from "./api";
-import type { Agent, GithubUpdate, ReadFileResult, ScanIssue, Settings, Skill, SkillFilter, Snapshot, SyncTargetStatus, Tag } from "./types";
+import type { Agent, ProvenanceStatus, ReadFileResult, ScanIssue, Settings, Skill, SkillCategory, SkillFilter, SkillProvenance, Snapshot, SyncTargetStatus, Tag } from "./types";
 
 type ViewMode = "grid" | "list";
 type Pane = "skills" | "settings";
@@ -128,7 +134,8 @@ const defaultSettings: Settings = {
   minimizeToTray: true,
   customAgents: [],
   snapshotsEnabled: true,
-  customTags: defaultTags
+  customTags: defaultTags,
+  provenanceAgentId: null
 };
 
 type ToastType = "success" | "error" | "info";
@@ -141,6 +148,11 @@ export default function App() {
   const [filter, setFilter] = useState<SkillFilter>({});
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [openFolder, setOpenFolder] = useState<FolderRef | null>(null);
+  const dragSkillRef = useRef<Skill | null>(null);
+  const mouseDragRef = useRef<{ skill: Skill; chipEl: HTMLElement } | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [folderToggle, setFolderToggle] = useState<Map<string, boolean>>(new Map());
   const [pane, setPane] = useState<Pane>("skills");
   const [homeState, setHomeState] = useState<{ pane: Pane; filter: SkillFilter; scrollY: number }>({ pane: "skills", filter: {}, scrollY: 0 });
   const mainRef = useRef<HTMLElement>(null);
@@ -150,8 +162,10 @@ export default function App() {
   const [scanIssues, setScanIssues] = useState<ScanIssue[]>([]);
   const [syncDraft, setSyncDraft] = useState<SyncDraft | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
-  const [githubUpdates, setGithubUpdates] = useState<Map<string, GithubUpdate>>(new Map());
-  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [provenance, setProvenance] = useState<Map<string, SkillProvenance>>(new Map());
+  const [traceProgress, setTraceProgress] = useState<{ done: number; total: number } | null>(null);
+  const [provFilter, setProvFilter] = useState<ProvenanceStatus | "all">("all");
+  const [showProvenanceInfo, setShowProvenanceInfo] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
   const [diffView, setDiffView] = useState<DiffView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -189,6 +203,7 @@ export default function App() {
       if (filter.starred && !skill.starred) return false;
       if (filter.tagId && !skill.tags.some((tag) => tag.id === filter.tagId)) return false;
       if (categorySkillNames && !categorySkillNames.has(skill.name)) return false;
+      if (provFilter !== "all" && (provenance.get(skill.name)?.status ?? "unknown") !== provFilter) return false;
       if (!q) return true;
       return [skill.displayName, skill.name, skill.description, skill.version, skill.dirPath]
         .join(" ")
@@ -205,7 +220,146 @@ export default function App() {
       }
     }
     return Array.from(seen.values());
-  }, [filter, query, skills, settings.customAgents]);
+  }, [filter, query, skills, settings.customAgents, provFilter, provenance]);
+
+  // Skills that live inside any manual folder should NOT appear in the overview.
+  const classifiedNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const agent of settings.customAgents) {
+      for (const cat of agent.categories ?? []) {
+        for (const n of cat.skillNames) names.add(n);
+      }
+    }
+    return names;
+  }, [settings.customAgents]);
+
+  const overviewSkills = useMemo(
+    () => visibleSkills.filter((s) => !classifiedNames.has(s.name)),
+    [visibleSkills, classifiedNames],
+  );
+
+  // T2 directory clustering + T5 majority-vote repo: group the visible skills by
+  // their shared install-root directory (e.g. `skills/gstack/...`). A root that
+  // holds ≥2 distinct skills is a bundle; singletons fall through to standalone.
+  const { bundleGroups, standaloneSkills } = useMemo(() => {
+    const groups = new Map<string, { root: string; agentId: string; skills: Skill[] }>();
+    for (const skill of overviewSkills) {
+      const root = bundleRootOf(skill, agents);
+      const key = `${skill.agentId}::${root}`;
+      let g = groups.get(key);
+      if (!g) { g = { root, agentId: skill.agentId, skills: [] }; groups.set(key, g); }
+      g.skills.push(skill);
+    }
+    const bundleGroups: BundleGroup[] = [];
+    const standalone: Skill[] = [];
+    for (const [key, g] of groups) {
+      if (g.skills.length < 2) { standalone.push(...g.skills); continue; }
+      const repoCount = new Map<string, number>();
+      for (const s of g.skills) {
+        const repo = provenance.get(s.name)?.repo;
+        if (repo) repoCount.set(repo, (repoCount.get(repo) ?? 0) + 1);
+      }
+      let repo: string | null = null;
+      let repoShare = 0;
+      for (const [r, c] of repoCount) { if (c > repoShare) { repoShare = c; repo = r; } }
+      bundleGroups.push({
+        key,
+        name: g.root,
+        agentId: g.agentId,
+        repo,
+        repoShare,
+        total: g.skills.length,
+        skills: g.skills.slice().sort((a, b) => a.name.localeCompare(b.name)),
+      });
+    }
+    bundleGroups.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+    standalone.sort((a, b) => a.name.localeCompare(b.name));
+    return { bundleGroups, standaloneSkills: standalone };
+  }, [overviewSkills, agents, provenance]);
+
+  // Clear the open folder when the user switches starred / tag via the sidebar
+  // (agent switch is handled by each handler's setOpenFolder(null) directly).
+  useEffect(() => {
+    setOpenFolder(null);
+  }, [filter.starred, filter.tagId]);
+
+  // Folder cards shown at the top of the overview: auto clusters (from the
+  // current view) + manual categories (agent-filtered, includes empty ones so
+  // they can be drop targets). Auto first, then categories.
+  const folderCards = useMemo<FolderCardModel[]>(() => {
+    const autoCards: FolderCardModel[] = bundleGroups.map((b) => ({
+      ref: { kind: "auto", key: b.key },
+      kind: "auto",
+      name: b.name,
+      count: b.total,
+      agentId: b.agentId,
+      repo: b.repo,
+      repoShare: b.repoShare,
+      total: b.total,
+    }));
+    const catCards: FolderCardModel[] = [];
+    for (const agent of settings.customAgents) {
+      if (filter.agentId && agent.id !== filter.agentId) continue;
+      for (const cat of agent.categories ?? []) {
+        catCards.push({
+          ref: { kind: "category", agentId: agent.id, categoryId: cat.id },
+          kind: "category",
+          name: cat.name,
+          count: cat.skillNames.length,
+          agentId: agent.id,
+          categoryId: cat.id,
+          repo: null,
+          repoShare: 0,
+          total: cat.skillNames.length,
+        });
+      }
+    }
+    catCards.sort((a, b) => a.name.localeCompare(b.name));
+    return [...autoCards, ...catCards];
+  }, [bundleGroups, settings.customAgents, filter.agentId]);
+
+  // Auto-detected folders per agent for the sidebar (computed from ALL skills,
+  // independent of the current filter). Keyed identically to bundleGroups.
+  const autoFoldersByAgent = useMemo(() => {
+    const byAgent = new Map<string, Map<string, Set<string>>>();
+    for (const skill of skills) {
+      const root = bundleRootOf(skill, agents);
+      if (!byAgent.has(skill.agentId)) byAgent.set(skill.agentId, new Map());
+      const roots = byAgent.get(skill.agentId)!;
+      if (!roots.has(root)) roots.set(root, new Set());
+      roots.get(root)!.add(skill.name);
+    }
+    const out = new Map<string, { key: string; name: string; count: number }[]>();
+    for (const [agentId, roots] of byAgent) {
+      const list: { key: string; name: string; count: number }[] = [];
+      for (const [root, names] of roots) {
+        if (names.size >= 2) list.push({ key: `${agentId}::${root}`, name: root, count: names.size });
+      }
+      list.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+      out.set(agentId, list);
+    }
+    return out;
+  }, [skills, agents]);
+
+  const provFilterOptions = useMemo<SelectOption<ProvenanceStatus | "all">[]>(() => {
+    const counts: Record<string, number> = { all: 0, verified: 0, likely: 0, ambiguous: 0, local: 0, unknown: 0 };
+    const seen = new Set<string>();
+    for (const skill of skills) {
+      if (seen.has(skill.name)) continue;
+      seen.add(skill.name);
+      const status = provenance.get(skill.name)?.status ?? "unknown";
+      counts.all += 1;
+      counts[status] = (counts[status] ?? 0) + 1;
+    }
+    return [
+      { value: "all", label: `全部来源 (${counts.all})` },
+      { value: "verified", label: `已验证 (${counts.verified})` },
+      { value: "likely", label: `疑似 (${counts.likely})` },
+      { value: "ambiguous", label: `歧义 (${counts.ambiguous})` },
+      { value: "local", label: `仅本地 (${counts.local})` },
+      { value: "unknown", label: `未溯源 (${counts.unknown})` },
+    ];
+  }, [skills, provenance]);
 
   const agentPresenceBySkillName = useMemo(() => {
     const groups = new Map<string, string[]>();
@@ -239,11 +393,19 @@ export default function App() {
   async function boot() {
     setError(null);
     try {
-      const [settingsResult, scanResult] = await Promise.all([api.getSettings(), api.scanAgents()]);
+      const [settingsResult, scanResult, provList] = await Promise.all([
+        api.getSettings(),
+        api.scanAgents(),
+        api.getProvenance().catch(() => [] as SkillProvenance[]),
+      ]);
       setSettings(settingsResult);
       setAgents(scanResult.agents);
       setSkills(scanResult.skills);
       setScanIssues(scanResult.scanErrors ?? []);
+      const idToName = new Map(scanResult.skills.map((skill) => [skill.id, skill.name]));
+      const provMap = mergeProvByName(new Map(), provList, idToName);
+      setProvenance(provMap);
+      void autoTraceProvenance(scanResult.skills, provMap, false, settingsResult.provenanceAgentId);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -256,6 +418,73 @@ export default function App() {
       setAgents(result.agents);
       setSkills(result.skills);
       setScanIssues(result.scanErrors ?? []);
+      void autoTraceProvenance(result.skills, provenance, false, settings.provenanceAgentId);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  /// Trace skills whose provenance is missing or unresolved (or all, when forced).
+  /// Deduplicates by name — one representative install per name — so duplicate
+  /// installs across agents don't multiply network requests.
+  async function autoTraceProvenance(
+    skillList: Skill[],
+    baseMap: Map<string, SkillProvenance>,
+    force = false,
+    scopeAgentId?: string | null,
+  ) {
+    // Optionally limit tracing to a single agent's skills (user-chosen scope).
+    const scoped = scopeAgentId ? skillList.filter((skill) => skill.agentId === scopeAgentId) : skillList;
+    const idToName = new Map(scoped.map((skill) => [skill.id, skill.name]));
+    // One representative install per name. Names can collide across agents on
+    // genuinely different content, so prefer the canonical copy whose directory
+    // is named after the skill (e.g. `skills/frontend-design/` over an import
+    // like `frontend-design-3-0.1.0/`) — that's the one we compare upstream.
+    const isCanonical = (skill: Skill) => skill.dirPath.split(/[\\/]/).pop() === skill.name;
+    const repByName = new Map<string, string>();
+    const repCanonical = new Map<string, boolean>();
+    for (const skill of scoped) {
+      if (!force) {
+        const existing = baseMap.get(skill.name);
+        if (existing && existing.status !== "unknown") continue;
+      }
+      const canonical = isCanonical(skill);
+      if (!repByName.has(skill.name)) {
+        repByName.set(skill.name, skill.id);
+        repCanonical.set(skill.name, canonical);
+      } else if (canonical && !repCanonical.get(skill.name)) {
+        repByName.set(skill.name, skill.id);
+        repCanonical.set(skill.name, true);
+      }
+    }
+    const ids = Array.from(repByName.values());
+    if (ids.length === 0) return;
+    setTraceProgress({ done: 0, total: ids.length });
+    const BATCH = 6;
+    let done = 0;
+    try {
+      for (let i = 0; i < ids.length; i += BATCH) {
+        const batch = ids.slice(i, i + BATCH);
+        // A failed batch must not abort the whole job — log and keep going.
+        try {
+          const results = await api.traceProvenance(batch);
+          setProvenance((prev) => mergeProvByName(prev, results, idToName));
+        } catch (err) {
+          setError(errorMessage(err));
+        }
+        done += batch.length;
+        setTraceProgress({ done, total: ids.length });
+      }
+    } finally {
+      setTraceProgress(null);
+    }
+  }
+
+  async function retraceSkill(skill: Skill) {
+    try {
+      const results = await api.traceProvenance([skill.id]);
+      const idToName = new Map(skills.map((item) => [item.id, item.name]));
+      setProvenance((prev) => mergeProvByName(prev, results, idToName));
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -560,29 +789,6 @@ export default function App() {
     }
   }
 
-  async function checkGithubUpdatesForSkills() {
-    const githubSkills = skills.filter((skill) => skill.source === "github");
-    if (githubSkills.length === 0) {
-      setError("没有 GitHub 来源的 Skill。");
-      return;
-    }
-    setCheckingUpdates(true);
-    try {
-      const updates = await api.checkGithubUpdates(githubSkills.map((skill) => skill.id));
-      const map = new Map<string, GithubUpdate>();
-      for (const update of updates) {
-        map.set(update.skillId, update);
-      }
-      setGithubUpdates(map);
-      const hasUpdates = updates.filter((update) => update.hasUpdate);
-      setError(hasUpdates.length > 0 ? `发现 ${hasUpdates.length} 个 Skill 有更新。` : "所有 GitHub 来源 Skill 均为最新。");
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setCheckingUpdates(false);
-    }
-  }
-
   const handleContextMenu = useCallback((event: React.MouseEvent, skill: Skill) => {
     event.preventDefault();
     event.stopPropagation();
@@ -605,11 +811,16 @@ export default function App() {
   }, [contextMenu, closeContextMenu]);
 
   async function updateSettings(next: Settings) {
-    const customAgentsChanged = JSON.stringify(settings.customAgents) !== JSON.stringify(next.customAgents);
+    // Only a change to agent paths / enabled-set / agent-set needs a disk
+    // rescan. Category, tag, and name edits are pure metadata — skip the rescan
+    // (avoids flicker and clobbering folder state mid-drag).
+    const sig = (list: Settings["customAgents"]) =>
+      JSON.stringify(list.map((a) => [a.id, a.paths, a.enabled]).sort());
+    const needsRescan = sig(settings.customAgents) !== sig(next.customAgents);
     setSettings(next);
     try {
       setSettings(await api.updateSettings(next));
-      if (customAgentsChanged) {
+      if (needsRescan) {
         await refresh();
       }
     } catch (err) {
@@ -662,6 +873,177 @@ export default function App() {
   const isMacChrome = document.documentElement.classList.contains("is-macos");
   const activeSyncTargets = syncDraft?.targets.filter((target) => target.status !== "same") ?? [];
 
+  // Resolve a folder ref to its display data + member skills (self-contained,
+  // independent of the current sidebar filter). Auto folders recompute from disk
+  // structure; category folders from the saved skillNames.
+  function resolveFolderView(ref: FolderRef): {
+    name: string;
+    kind: "auto" | "category";
+    repo: string | null;
+    repoShare: number;
+    total: number;
+    skills: Skill[];
+  } | null {
+    const q = query.trim().toLowerCase();
+    const matchQ = (s: Skill) => !q || [s.displayName, s.name, s.description].join(" ").toLowerCase().includes(q);
+    if (ref.kind === "auto") {
+      const sep = ref.key.indexOf("::");
+      const agentId = ref.key.slice(0, sep);
+      const root = ref.key.slice(sep + 2);
+      const seen = new Map<string, Skill>();
+      for (const s of skills) {
+        if (s.agentId !== agentId || bundleRootOf(s, agents) !== root) continue;
+        if (!seen.has(s.name)) seen.set(s.name, s);
+      }
+      if (seen.size === 0) return null;
+      const repoCount = new Map<string, number>();
+      for (const s of seen.values()) {
+        const r = provenance.get(s.name)?.repo;
+        if (r) repoCount.set(r, (repoCount.get(r) ?? 0) + 1);
+      }
+      let repo: string | null = null;
+      let repoShare = 0;
+      for (const [r, c] of repoCount) if (c > repoShare) { repoShare = c; repo = r; }
+      const members = [...seen.values()].filter(matchQ).sort((a, b) => a.name.localeCompare(b.name));
+      return { name: root, kind: "auto", repo, repoShare, total: seen.size, skills: members };
+    }
+    const cat = settings.customAgents.find((a) => a.id === ref.agentId)?.categories?.find((c) => c.id === ref.categoryId);
+    if (!cat) return null;
+    const names = new Set(cat.skillNames);
+    const seen = new Map<string, Skill>();
+    for (const s of skills) {
+      if (s.agentId !== ref.agentId || !names.has(s.name)) continue;
+      if (!seen.has(s.name)) seen.set(s.name, s);
+    }
+    const members = [...seen.values()].filter(matchQ).sort((a, b) => a.name.localeCompare(b.name));
+    return { name: cat.name, kind: "category", repo: null, repoShare: 0, total: seen.size, skills: members };
+  }
+
+  // Drag-to-classify: move a skill into a manual folder. A skill lives in at
+  // most ONE folder per agent, so it is removed from sibling categories and
+  // added to the target.
+  function addSkillToCategory(skill: Skill, agentId: string, categoryId: string) {
+    const customAgents = settings.customAgents.map((a) => {
+      if (a.id !== agentId) return a;
+      return {
+        ...a,
+        categories: (a.categories ?? []).map((c) => {
+          const without = c.skillNames.filter((n) => n !== skill.name);
+          return c.id === categoryId ? { ...c, skillNames: [...without, skill.name] } : { ...c, skillNames: without };
+        }),
+      };
+    });
+    updateSettings({ ...settings, customAgents });
+  }
+
+  // Remove a skill from a manual folder (category).
+  function removeSkillFromCategory(skill: Skill, agentId: string, categoryId: string) {
+    const customAgents = settings.customAgents.map((a) => {
+      if (a.id !== agentId) return a;
+      return {
+        ...a,
+        categories: (a.categories ?? []).map((c) =>
+          c.id === categoryId ? { ...c, skillNames: c.skillNames.filter((n) => n !== skill.name) } : c,
+        ),
+      };
+    });
+    updateSettings({ ...settings, customAgents });
+  }
+
+  // Drag-to-classify: attach a tag to a skill (persisted in DB via setSkillTags).
+  async function addTagToSkill(skill: Skill, tag: Tag) {
+    if (skill.tags.some((t) => t.id === tag.id)) return;
+    try {
+      const updated = await api.setSkillTags(skill.id, [...skill.tags, tag]);
+      setSkills((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setTabs((prev) => prev.map((t) => (t.skill.id === updated.id ? { ...t, skill: updated } : t)));
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  // ── Mouse-based drag (replaces HTML5 DnD which is broken in Tauri WKWebView) ──
+  // Drop targets self-report via onMouseEnter/onMouseLeave during drag.
+
+  const hoveredDropTarget = useRef<{ type: string; agentId?: string; id: string } | null>(null);
+
+  function onDropTargetEnter(type: string, id: string, agentId?: string) {
+    if (!mouseDragRef.current) return;
+    hoveredDropTarget.current = { type, id, agentId };
+    setDropTarget(`${type}:${id}`);
+  }
+
+  function onDropTargetLeave() {
+    if (!mouseDragRef.current) return;
+    hoveredDropTarget.current = null;
+    setDropTarget(null);
+  }
+
+  function onSkillMouseDown(skill: Skill, e: React.MouseEvent) {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button")) return;
+    e.preventDefault();
+    const chip = document.createElement("div");
+    chip.className = "drag-chip";
+    chip.textContent = skill.displayName || skill.name;
+    document.body.appendChild(chip);
+    chip.style.left = `${e.clientX - 40}px`;
+    chip.style.top = `${e.clientY - 16}px`;
+    mouseDragRef.current = { skill, chipEl: chip };
+    dragSkillRef.current = skill;
+    document.addEventListener("mousemove", onDocMouseMove);
+    document.addEventListener("mouseup", onDocMouseUp);
+  }
+
+  function onDocMouseMove(e: MouseEvent) {
+    const d = mouseDragRef.current;
+    if (!d) return;
+    d.chipEl.style.left = `${e.clientX - 40}px`;
+    d.chipEl.style.top = `${e.clientY - 16}px`;
+  }
+
+  function onDocMouseUp(e: MouseEvent) {
+    document.removeEventListener("mousemove", onDocMouseMove);
+    document.removeEventListener("mouseup", onDocMouseUp);
+    const d = mouseDragRef.current;
+    if (!d) return;
+    d.chipEl.remove();
+    mouseDragRef.current = null;
+    const target = hoveredDropTarget.current;
+    if (target) {
+      if (target.type === "cat") {
+        addSkillToCategory(d.skill, target.agentId ?? "", target.id);
+      } else if (target.type === "tag") {
+        const tag = settings.customTags.find((t) => t.id === target.id);
+        if (tag) void addTagToSkill(d.skill, tag);
+      }
+    }
+    hoveredDropTarget.current = null;
+    dragSkillRef.current = null;
+    setDropTarget(null);
+  }
+
+  function renderSkillCard(skill: Skill) {
+    const folderRemove = openFolder?.kind === "category"
+      ? () => removeSkillFromCategory(skill, openFolder.agentId, openFolder.categoryId)
+      : undefined;
+    return (
+      <SkillCard
+        key={skill.id}
+        skill={skill}
+        agents={agents}
+        agentIds={agentPresenceBySkillName.get(skill.name) ?? [skill.agentId]}
+        provenance={provenance.get(skill.name)}
+        onOpen={openSkill}
+        onSync={openSyncPanel}
+        onToggleStar={toggleStar}
+        onContextMenu={handleContextMenu}
+        onMouseDown={(e) => onSkillMouseDown(skill, e)}
+        onRemoveFromFolder={folderRemove}
+      />
+    );
+  }
+
   return (
     <div className={`app-shell ${themeClass}`}>
       <aside className="sidebar">
@@ -698,6 +1080,7 @@ export default function App() {
             setActiveTabIndex(-1);
             setPane("skills");
             setFilter(newFilter);
+            setOpenFolder(null);
           }}>
             <Star size={16} /> 收藏夹 <span className="nav-count">{new Set(skills.filter((skill) => skill.starred).map((skill) => skill.name)).size}</span>
           </button>
@@ -709,109 +1092,68 @@ export default function App() {
             const agentConfig = settings.customAgents.find((a) => a.id === agent.id);
             const categories = agentConfig?.categories ?? [];
             return (
-              <div key={agent.id} className="agent-nav-group">
-                <div className="agent-nav-row">
-                  <button className={navClass(activeTabIndex < 0 && filter.agentId === agent.id && !filter.categoryId)} onClick={() => {
-                    const newFilter = { agentId: agent.id };
-                    if (activeTabIndex >= 0) {
-                      const currentTab = tabs[activeTabIndex];
-                      if (currentTab) {
-                        const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
-                        tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
-                      }
-                      setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
-                      setPendingScrollY(0);
-                    } else {
-                      setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+              <AgentNavGroup
+                key={agent.id}
+                agent={agent}
+                categories={categories}
+                autoFolders={autoFoldersByAgent.get(agent.id) ?? []}
+                skillCount={new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}
+                expanded={folderToggle.get(agent.id) ?? ((autoFoldersByAgent.get(agent.id) ?? []).length <= 8)}
+                onToggleExpand={() => setFolderToggle((m) => {
+                  const cur = m.get(agent.id) ?? ((autoFoldersByAgent.get(agent.id) ?? []).length <= 8);
+                  const n = new Map(m); n.set(agent.id, !cur); return n;
+                })}
+                isAgentActive={activeTabIndex < 0 && filter.agentId === agent.id && !openFolder}
+                openFolder={activeTabIndex < 0 ? openFolder : null}
+                editingCategoryId={editingCategoryId}
+                confirmDeleteCategoryId={confirmDeleteCategoryId}
+                dragSkill={dragSkillRef.current}
+                dropTarget={dropTarget}
+                navClass={navClass}
+                onSelectAgent={() => {
+                  setOpenFolder(null);
+                  const newFilter = { agentId: agent.id };
+                  if (activeTabIndex >= 0) {
+                    const currentTab = tabs[activeTabIndex];
+                    if (currentTab) {
+                      const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
+                      tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
                     }
-                    setActiveTabIndex(-1);
-                    setPane("skills");
-                    setFilter(newFilter);
-                  }}>
-                    <AgentIcon icon={agent.icon || ""} size={16} /> <span className="agent-name">{agent.name}</span>
-                    <span className="nav-count">{new Set(skills.filter((skill) => skill.agentId === agent.id).map((skill) => skill.name)).size}</span>
-                  </button>
-                  <button className="add-category-icon" onClick={(e) => {
-                    e.stopPropagation();
-                    const newCat = { id: `cat-${crypto.randomUUID().slice(0, 8)}`, name: nextDefaultName(agentConfig?.categories ?? [], "新分类"), skillNames: [] as string[] };
-                    const newCats = [...(agentConfig?.categories ?? []), newCat];
-                    updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
-                    setEditingCategoryId(newCat.id);
-                    setConfirmDeleteCategoryId(null);
-                  }} title="添加子分类"><Plus size={14} /></button>
-                </div>
-                <div className="agent-categories">
-                  {categories.map((cat) => (
-                    <div key={cat.id} className="sidebar-category-item">
-                      {editingCategoryId === cat.id ? (
-                        <InlineInput
-                          placeholder="分类名称"
-                          initialValue={cat.name}
-                          onSubmit={(name) => {
-                            const newCats = (agentConfig?.categories ?? []).map((c) => c.id === cat.id ? { ...c, name } : c);
-                            updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
-                            setEditingCategoryId(null);
-                          }}
-                          onCancel={() => setEditingCategoryId(null)}
-                        />
-                      ) : (
-                        <>
-                          <button
-                            className={navClass(activeTabIndex < 0 && filter.categoryId === cat.id && filter.categoryAgentId === agent.id)}
-                            onClick={() => {
-                              const newFilter = { agentId: agent.id, categoryId: cat.id, categoryAgentId: agent.id };
-                              if (activeTabIndex >= 0) {
-                                const currentTab = tabs[activeTabIndex];
-                                if (currentTab) {
-                                  const key = `${currentTab.skill.name}::${currentTab.selectedFile}`;
-                                  tabScrollRef.current.set(key, mainRef.current?.scrollTop ?? 0);
-                                }
-                                setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
-                                setPendingScrollY(0);
-                              } else {
-                                setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
-                              }
-                              setActiveTabIndex(-1);
-                              setPane("skills");
-                              setFilter(newFilter);
-                            }}
-                          >
-                            <span className="category-dot" /><span className="agent-name">{cat.name}</span>
-                            <span className="nav-count">{cat.skillNames.length}</span>
-                          </button>
-                          {confirmDeleteCategoryId === cat.id ? (
-                            <div className="sidebar-confirm">
-                              <span className="sidebar-confirm-label">删除?</span>
-                              <button className="icon-btn danger" onClick={(e) => {
-                                e.stopPropagation();
-                                const newCats = (agentConfig?.categories ?? []).filter((c) => c.id !== cat.id);
-                                updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
-                                setConfirmDeleteCategoryId(null);
-                              }} title="确认删除"><Check size={12} /></button>
-                              <button className="icon-btn" onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmDeleteCategoryId(null);
-                              }} title="取消"><X size={12} /></button>
-                            </div>
-                          ) : (
-                            <div className="sidebar-item-actions">
-                              <button className="icon-btn" onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmDeleteCategoryId(null);
-                                setEditingCategoryId(cat.id);
-                              }} title="重命名"><SettingsIcon size={12} /></button>
-                              <button className="icon-btn danger" onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmDeleteCategoryId(cat.id);
-                              }} title="删除"><Trash2 size={12} /></button>
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
+                    setHomeState({ pane: "skills", filter: newFilter, scrollY: 0 });
+                    setPendingScrollY(0);
+                  } else {
+                    setHomeState((prev) => ({ ...prev, filter: newFilter, scrollY: 0 }));
+                  }
+                  setActiveTabIndex(-1);
+                  setPane("skills");
+                  setFilter(newFilter);
+                }}
+                onOpenFolder={(ref) => { setActiveTabIndex(-1); setPane("skills"); setOpenFolder(ref); }}
+                onAddCategory={() => {
+                  const newCat = { id: `cat-${crypto.randomUUID().slice(0, 8)}`, name: nextDefaultName(agentConfig?.categories ?? [], "新分类"), skillNames: [] as string[] };
+                  const newCats = [...(agentConfig?.categories ?? []), newCat];
+                  updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                  setEditingCategoryId(newCat.id);
+                  setConfirmDeleteCategoryId(null);
+                }}
+                onRenameCategory={(catId, name) => {
+                  const newCats = (agentConfig?.categories ?? []).map((c) => c.id === catId ? { ...c, name } : c);
+                  updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                  setEditingCategoryId(null);
+                }}
+                onDeleteCategory={(catId) => {
+                  const newCats = (agentConfig?.categories ?? []).filter((c) => c.id !== catId);
+                  updateSettings({ ...settings, customAgents: settings.customAgents.map((a) => a.id === agent.id ? { ...a, categories: newCats } : a) });
+                  setConfirmDeleteCategoryId(null);
+                }}
+                onStartEdit={(catId) => { setConfirmDeleteCategoryId(null); setEditingCategoryId(catId); }}
+                onAskDelete={(catId) => setConfirmDeleteCategoryId(catId)}
+                onCancelEdit={() => setEditingCategoryId(null)}
+                onCancelDelete={() => setConfirmDeleteCategoryId(null)}
+                setDropTarget={setDropTarget}
+                onDropTargetEnter={onDropTargetEnter}
+                onDropTargetLeave={onDropTargetLeave}
+              />
             );
           })}
         </nav>
@@ -828,8 +1170,15 @@ export default function App() {
           }} title="添加标签"><Plus size={14} /></button>
         </div>
         <nav className="nav-section">
-          {settings.customTags.map((tag) => (
-            <div key={tag.id} className="sidebar-tag-item">
+          {settings.customTags.map((tag) => {
+            const dropKey = `tag:${tag.id}`;
+            return (
+            <div
+              key={tag.id}
+              className={`sidebar-tag-item${dropTarget === dropKey ? " drop-active" : ""}`}
+              onMouseEnter={() => onDropTargetEnter("tag", tag.id)}
+              onMouseLeave={onDropTargetLeave}
+            >
               {editingTagId === tag.id ? (
                 <InlineInput
                   placeholder="标签名称"
@@ -890,7 +1239,8 @@ export default function App() {
                 </>
               )}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
         <div className="sidebar-actions">
@@ -960,7 +1310,7 @@ export default function App() {
 
         <header className="topbar">
           <div>
-            <h1>{activeTab ? activeTab.skill.displayName : pane === "settings" ? "设置" : "Skill 总览"}</h1>
+            <h1 className={activeTab ? "skill-title-serif" : undefined}>{activeTab ? activeTab.skill.displayName : pane === "settings" ? "设置" : "Skill 总览"}</h1>
             <p>{activeTab ? `${agentName(agents, activeTab.skill.agentId)} > ${activeTab.selectedFile}` : "扫描、编辑和同步本地 Coding Agent Skills"}</p>
           </div>
           {!activeTab && pane === "skills" && (
@@ -971,9 +1321,12 @@ export default function App() {
           )}
           {!activeTab && pane === "skills" && (
             <div className="topbar-actions">
-              <button className="ghost-button" onClick={checkGithubUpdatesForSkills} disabled={checkingUpdates}>
-                <CloudDownload size={15} /> {checkingUpdates ? "检查中..." : "检查更新"}
-              </button>
+              <div className="prov-filter">
+                <CustomSelect value={provFilter} options={provFilterOptions} onChange={setProvFilter} />
+              </div>
+              {traceProgress && (
+                <span className="trace-progress"><BadgeCheck size={14} /> 溯源中 {traceProgress.done}/{traceProgress.total}</span>
+              )}
               <div className="segmented">
                 <button className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")} title="网格"><Grid2X2 size={16} /></button>
                 <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="列表"><List size={16} /></button>
@@ -998,7 +1351,14 @@ export default function App() {
         )}
 
         {pane === "settings" && !activeTab ? (
-          <SettingsPanel settings={settings} onChange={updateSettings} />
+          <SettingsPanel
+            settings={settings}
+            onChange={updateSettings}
+            agents={agents}
+            traceProgress={traceProgress}
+            onTraceScoped={() => void autoTraceProvenance(skills, provenance, true, settings.provenanceAgentId)}
+            onShowProvenanceInfo={() => setShowProvenanceInfo(true)}
+          />
         ) : activeTab ? (
           <section className="editor-layout">
             <div className="editor-card">
@@ -1020,7 +1380,6 @@ export default function App() {
               <dl className="meta">
                 <dt>编码</dt><dd>{activeTab.fileState?.encoding ?? "-"}</dd>
                 <dt>版本</dt><dd>{activeTab.skill.version || "-"}</dd>
-                <dt>来源</dt><dd>{activeTab.skill.source}</dd>
                 <dt>路径</dt><dd title={activeTab.skill.dirPath}>{activeTab.skill.dirPath}</dd>
                 <dt>存在于</dt>
                 <dd>
@@ -1030,6 +1389,12 @@ export default function App() {
                   />
                 </dd>
               </dl>
+              <h2>来源</h2>
+              <ProvenanceCard
+                provenance={provenance.get(activeTab.skill.name)}
+                onOpenRepo={(repo) => void api.openUrl(`https://github.com/${repo}`)}
+                onRetrace={() => void retraceSkill(activeTab.skill)}
+              />
               <button className="wide-button" onClick={openSelectedInFileManager}><FolderOpen size={16} /> 在文件管理器中显示</button>
               <h2>标签</h2>
               <TagPicker
@@ -1097,29 +1462,91 @@ export default function App() {
             </aside>
           </section>
         ) : (
-          <section className={viewMode === "grid" ? "skill-grid" : "skill-list"}>
-            {visibleSkills.length === 0 ? (
+          openFolder ? (
+            (() => {
+              const fv = resolveFolderView(openFolder);
+              if (!fv) {
+                return (
+                  <section className={viewMode === "grid" ? "skill-grid" : "skill-list"}>
+                    <div className="empty-state">
+                      <Sparkles size={28} />
+                      <h2>文件夹不存在</h2>
+                      <p>可能已被删除或重命名。<button className="link-button" onClick={() => setOpenFolder(null)}>返回总览</button></p>
+                    </div>
+                  </section>
+                );
+              }
+              const confident = !!fv.repo && fv.repoShare / fv.total >= 0.5;
+              return (
+                <>
+                  <div className="folder-bar">
+                    <button className="folder-back" onClick={() => setOpenFolder(null)}>
+                      <ChevronLeft size={16} /> 返回
+                    </button>
+                    <Folder size={16} className={fv.kind === "category" ? "folder-icon-cat" : undefined} />
+                    <span className="folder-bar-name">{fv.name}</span>
+                    {fv.kind === "category" && <span className="folder-bar-tag">我的分类</span>}
+                    {fv.repo && (confident ? (
+                      <button className="bundle-repo" onClick={() => void api.openUrl(`https://github.com/${fv.repo}`)} title={`多数来源：${fv.repoShare}/${fv.total} 个 Skill 指向此仓库`}>
+                        <Github size={12} /> {fv.repo}
+                      </button>
+                    ) : (
+                      <button className="bundle-repo mixed" onClick={() => void api.openUrl(`https://github.com/${fv.repo}`)} title={`混合来源：最多 ${fv.repoShare}/${fv.total} 个指向 ${fv.repo}`}>
+                        <Github size={12} /> 混合来源
+                      </button>
+                    ))}
+                    <span className="folder-bar-count">{fv.skills.length} skills</span>
+                  </div>
+                  <section className={viewMode === "grid" ? "skill-grid" : "skill-list"}>
+                    {fv.skills.length === 0 ? (
+                      <div className="empty-state">
+                        <Sparkles size={28} />
+                        <h2>这个文件夹下没有 Skill</h2>
+                        <p>{fv.kind === "category" ? "把 Skill 卡片拖到侧边栏的这个分类即可归类。" : "当前搜索条件过滤掉了全部内容。"}<button className="link-button" onClick={() => setOpenFolder(null)}>返回总览</button></p>
+                      </div>
+                    ) : (
+                      fv.skills.map((skill) => renderSkillCard(skill))
+                    )}
+                  </section>
+                </>
+              );
+            })()
+          ) : filter.tagId || filter.starred ? (
+            // Tag / starred views are flat lists — no folders here.
+            <section className={viewMode === "grid" ? "skill-grid" : "skill-list"}>
+              {overviewSkills.length === 0 ? (
+                <div className="empty-state">
+                  <Sparkles size={28} />
+                  <h2>{filter.starred ? "还没有收藏的 Skill" : "这个标签下还没有 Skill"}</h2>
+                  <p>{filter.starred ? "点开任意 Skill 的星标即可收藏。" : "把 Skill 卡片拖到侧边栏的这个标签即可打标。"}</p>
+                </div>
+              ) : (
+                overviewSkills.map((skill) => renderSkillCard(skill))
+              )}
+            </section>
+          ) : standaloneSkills.length === 0 && folderCards.length === 0 ? (
+            <section className={viewMode === "grid" ? "skill-grid" : "skill-list"}>
               <div className="empty-state">
                 <Sparkles size={28} />
                 <h2>没有发现 Skill</h2>
                 <p>点击左下角"扫描"，或在设置中添加自定义 Agent Skill 目录。</p>
               </div>
-            ) : (
-              visibleSkills.map((skill) => (
-                <SkillCard
-                  key={skill.id}
-                  skill={skill}
-                  agents={agents}
-                  agentIds={agentPresenceBySkillName.get(skill.name) ?? [skill.agentId]}
-                  update={githubUpdates.get(skill.id)}
-                  onOpen={openSkill}
-                  onSync={openSyncPanel}
-                  onToggleStar={toggleStar}
-                  onContextMenu={handleContextMenu}
+            </section>
+          ) : (
+            <section className={viewMode === "grid" ? "skill-grid" : "skill-list"}>
+              {folderCards.map((folder) => (
+                <FolderCard
+                  key={`${folder.agentId}:${folder.categoryId ?? folder.name}`}
+                  folder={folder}
+                  onOpen={() => setOpenFolder(folder.ref)}
+                  dropTarget={dropTarget}
+                  onDropTargetEnter={onDropTargetEnter}
+                  onDropTargetLeave={onDropTargetLeave}
                 />
-              ))
-            )}
-          </section>
+              ))}
+              {standaloneSkills.map((skill) => renderSkillCard(skill))}
+            </section>
+          )
         )}
       </main>
 
@@ -1201,6 +1628,8 @@ export default function App() {
         </div>
       )}
 
+      {showProvenanceInfo && <ProvenanceInfoModal onClose={() => setShowProvenanceInfo(false)} />}
+
       {contextMenu && (
         <div className="context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(e) => e.stopPropagation()}>
           <button onClick={() => { openSkill(contextMenu.skill); closeContextMenu(); }}>
@@ -1262,40 +1691,355 @@ export default function App() {
   );
 }
 
+const PROVENANCE_META: Record<ProvenanceStatus, { label: string; short: string; icon: typeof BadgeCheck }> = {
+  verified: { label: "已验证 GitHub 来源", short: "已验证", icon: BadgeCheck },
+  likely: { label: "疑似 GitHub 来源", short: "疑似", icon: Github },
+  ambiguous: { label: "多个同名来源，需确认", short: "歧义", icon: AlertTriangle },
+  local: { label: "仅本地 / 未公开", short: "本地", icon: Laptop },
+  unknown: { label: "尚未溯源", short: "未溯源", icon: HelpCircle },
+};
+
+function provStatus(p?: SkillProvenance): ProvenanceStatus {
+  return p?.status ?? "unknown";
+}
+
+/// Merge trace results into a name-keyed provenance map. Provenance is a property
+/// of the skill (by name), so one trace covers every install that shares the name.
+/// Newest result wins, but a resolved entry is never downgraded back to "unknown".
+function mergeProvByName(
+  base: Map<string, SkillProvenance>,
+  results: SkillProvenance[],
+  idToName: Map<string, string>,
+): Map<string, SkillProvenance> {
+  const next = new Map(base);
+  for (const result of results) {
+    const name = idToName.get(result.skillId);
+    if (!name) continue;
+    const current = next.get(name);
+    if (!current || result.status !== "unknown" || current.status === "unknown") {
+      next.set(name, result);
+    }
+  }
+  return next;
+}
+
+function ProvenanceBadge({ provenance, withText = false }: { provenance?: SkillProvenance; withText?: boolean }) {
+  const status = provStatus(provenance);
+  const meta = PROVENANCE_META[status];
+  const Icon = meta.icon;
+  const title = provenance?.repo ? `${meta.label} · ${provenance.repo}` : meta.label;
+  return (
+    <span className={`prov-badge prov-${status}`} title={title}>
+      <Icon size={12} />
+      {withText && <span>{meta.short}</span>}
+    </span>
+  );
+}
+
+function ProvenanceCard({
+  provenance,
+  onOpenRepo,
+  onRetrace,
+}: {
+  provenance?: SkillProvenance;
+  onOpenRepo: (repo: string) => void;
+  onRetrace: () => void;
+}) {
+  const status = provStatus(provenance);
+  const meta = PROVENANCE_META[status];
+  const Icon = meta.icon;
+  const contentLabel =
+    provenance?.contentMatch === "identical"
+      ? "与上游一致"
+      : provenance?.contentMatch === "differs"
+      ? "与上游有差异"
+      : null;
+  return (
+    <div className={`prov-card prov-${status}`}>
+      <div className="prov-card-head">
+        <span className="prov-card-status"><Icon size={14} /> {meta.label}</span>
+        <button className="prov-retrace" onClick={onRetrace} title="重新溯源"><RefreshCcw size={12} /></button>
+      </div>
+      {provenance?.repo && (
+        <button className="prov-repo" onClick={() => onOpenRepo(provenance.repo!)} title="在 GitHub 打开">
+          <Github size={12} /> {provenance.repo}
+        </button>
+      )}
+      <div className="prov-card-meta">
+        {typeof provenance?.installs === "number" && provenance.installs > 0 && (
+          <span>{provenance.installs.toLocaleString()} 安装</span>
+        )}
+        {contentLabel && <span className={provenance?.contentMatch === "identical" ? "prov-ok" : "prov-warn"}>{contentLabel}</span>}
+      </div>
+      {status === "ambiguous" && provenance && provenance.candidates.length > 1 && (
+        <div className="prov-candidates">
+          <span className="prov-candidates-label">候选来源：</span>
+          {provenance.candidates.map((cand) => (
+            <button key={cand.repo} className="prov-candidate" onClick={() => onOpenRepo(cand.repo)} title={`${cand.installs.toLocaleString()} 安装`}>
+              {cand.repo}
+            </button>
+          ))}
+        </div>
+      )}
+      {provenance?.error && <p className="prov-error">{provenance.error}</p>}
+      {status === "local" && <p className="prov-hint">未在 skills.sh 找到同名来源，可能是本地自制或尚未公开。</p>}
+    </div>
+  );
+}
+
+function ProvenanceInfoModal({ onClose }: { onClose: () => void }) {
+  const tiers: { status: ProvenanceStatus; desc: string }[] = [
+    { status: "verified", desc: "在 skills.sh 找到同名来源，且本地 SKILL.md 内容与该 GitHub 仓库的上游高度一致（行级相似度 ≥ 0.6）。最可信。" },
+    { status: "likely", desc: "找到了主导来源（安装量远超其他同名仓库，或是唯一候选），但本地内容与上游差异较大，无法逐字确认——通常是同一个 Skill 的旧版本或改过的版本。" },
+    { status: "ambiguous", desc: "有多个安装量接近的同名仓库，且都没能在内容上对上号。会列出候选仓库，由你判断。" },
+    { status: "local", desc: "skills.sh 上查不到同名 Skill，判定为本地自制或尚未公开发布。" },
+    { status: "unknown", desc: "尚未溯源，或上次溯源时网络/限流失败，会在下次启动自动重试。" },
+  ];
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="prov-info-modal" role="dialog" aria-modal="true" aria-labelledby="prov-info-title" onMouseDown={(e) => e.stopPropagation()}>
+        <header>
+          <div>
+            <h2 id="prov-info-title">Skill 溯源是怎么判断的</h2>
+            <p>给每个本地 Skill 找出它的来源：来自某个 GitHub 仓库，还是本地自制。</p>
+          </div>
+          <button className="icon-button" onClick={onClose}><X size={16} /></button>
+        </header>
+        <div className="prov-info-body">
+          <h3>判断流程</h3>
+          <ol>
+            <li>用 Skill 名称去权威平台 <strong>skills.sh</strong> 搜索同名候选（自带所属 GitHub 仓库 <code>owner/repo</code> 与安装量）。</li>
+            <li>从 <code>raw.githubusercontent.com</code> 拉取热度最高的几个候选的上游 <code>SKILL.md</code>，与本地内容做<strong>行级相似度</strong>比对，取最佳匹配。</li>
+            <li>综合"是否有同名候选 + 内容是否对得上 + 某个仓库是否占绝对主导"，归入下面五档之一。</li>
+          </ol>
+          <h3>五种来源状态</h3>
+          <ul className="prov-info-tiers">
+            {tiers.map(({ status, desc }) => {
+              const meta = PROVENANCE_META[status];
+              const Icon = meta.icon;
+              return (
+                <li key={status}>
+                  <span className={`prov-badge prov-${status}`}><Icon size={12} /> {meta.short}</span>
+                  <span className="prov-info-tier-desc">{desc}</span>
+                </li>
+              );
+            })}
+          </ul>
+          <h3>关于速度与隐私</h3>
+          <ul className="prov-info-notes">
+            <li>溯源在扫描后<strong>后台自动进行</strong>，结果缓存在本地，之后启动直接读缓存，不会重复联网。</li>
+            <li>skills.sh 按 IP 限流（约每 10–13 个请求要等 60 秒），所以 Skill 很多时首次会比较慢、进度条会间歇停顿。可在上方<strong>限定只对某个 Agent 溯源</strong>来加快。</li>
+            <li>只会把 Skill <strong>名称</strong>发给 skills.sh、并从 GitHub 拉取公开内容比对，<strong>不会上传你的本地 Skill 内容</strong>。</li>
+          </ul>
+        </div>
+        <footer>
+          <button className="primary" onClick={onClose}>知道了</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function AgentNavGroup({
+  agent, categories, autoFolders, skillCount, expanded, onToggleExpand,
+  isAgentActive, openFolder, editingCategoryId, confirmDeleteCategoryId,
+  dragSkill, dropTarget, navClass,
+  onSelectAgent, onOpenFolder, onAddCategory, onRenameCategory, onDeleteCategory,
+  onStartEdit, onAskDelete, onCancelEdit, onCancelDelete, setDropTarget, onDropTargetEnter, onDropTargetLeave,
+}: {
+  agent: Agent;
+  categories: SkillCategory[];
+  autoFolders: { key: string; name: string; count: number }[];
+  skillCount: number;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  isAgentActive: boolean;
+  openFolder: FolderRef | null;
+  editingCategoryId: string | null;
+  confirmDeleteCategoryId: string | null;
+  dragSkill: Skill | null;
+  dropTarget: string | null;
+  navClass: (active: boolean) => string;
+  onSelectAgent: () => void;
+  onOpenFolder: (ref: FolderRef) => void;
+  onAddCategory: () => void;
+  onRenameCategory: (catId: string, name: string) => void;
+  onDeleteCategory: (catId: string) => void;
+  onStartEdit: (catId: string) => void;
+  onAskDelete: (catId: string) => void;
+  onCancelEdit: () => void;
+  onCancelDelete: () => void;
+  setDropTarget: (key: string | null) => void;
+  onDropTargetEnter: (type: string, id: string, agentId?: string) => void;
+  onDropTargetLeave: () => void;
+}) {
+  const hasSub = autoFolders.length > 0 || categories.length > 0;
+  return (
+    <div className="agent-nav-group">
+      <div className={`agent-nav-row${hasSub ? " has-sub" : ""}`}>
+        <button
+          className="agent-icon-btn"
+          onClick={(e) => { e.stopPropagation(); if (hasSub) onToggleExpand(); else onSelectAgent(); }}
+          title={hasSub ? (expanded ? "折叠" : "展开") : agent.name}
+        >
+          <span className="agent-icon-default"><AgentIcon icon={agent.icon || ""} size={16} /></span>
+          {hasSub && (
+            <span className="agent-icon-hover">{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+          )}
+        </button>
+        <button className={`agent-name-btn ${navClass(isAgentActive)}`} onClick={onSelectAgent}>
+          <span className="agent-name">{agent.name}</span>
+          <span className="nav-count">{skillCount}</span>
+        </button>
+        <button className="add-category-icon" onClick={(e) => { e.stopPropagation(); onAddCategory(); }} title="新建文件夹"><Plus size={14} /></button>
+      </div>
+      {expanded && hasSub && (
+        <div className="agent-categories">
+          {autoFolders.map((af) => (
+            <div key={af.key} className="sidebar-folder-item">
+              <button
+                className={navClass(!!openFolder && openFolder.kind === "auto" && openFolder.key === af.key)}
+                onClick={() => onOpenFolder({ kind: "auto", key: af.key })}
+                title={`自动识别合集 · ${af.count} 个 Skill`}
+              >
+                <Folder size={13} className="sidebar-folder-icon" /><span className="agent-name">{af.name}</span>
+                <span className="nav-count">{af.count}</span>
+              </button>
+            </div>
+          ))}
+          {categories.map((cat) => {
+            const active = !!openFolder && openFolder.kind === "category" && openFolder.categoryId === cat.id && openFolder.agentId === agent.id;
+            const dropKey = `cat:${cat.id}`;
+            return (
+              <div
+                key={cat.id}
+                className={`sidebar-category-item${dropTarget === dropKey ? " drop-active" : ""}`}
+                onMouseEnter={() => onDropTargetEnter("cat", cat.id, agent.id)}
+                onMouseLeave={onDropTargetLeave}
+              >
+                {editingCategoryId === cat.id ? (
+                  <InlineInput
+                    placeholder="分类名称"
+                    initialValue={cat.name}
+                    onSubmit={(name) => onRenameCategory(cat.id, name)}
+                    onCancel={onCancelEdit}
+                  />
+                ) : (
+                  <>
+                    <button className={navClass(active)} onClick={() => onOpenFolder({ kind: "category", agentId: agent.id, categoryId: cat.id })}>
+                      <span className="category-dot" /><span className="agent-name">{cat.name}</span>
+                      <span className="nav-count">{cat.skillNames.length}</span>
+                    </button>
+                    {confirmDeleteCategoryId === cat.id ? (
+                      <div className="sidebar-confirm">
+                        <span className="sidebar-confirm-label">删除?</span>
+                        <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onDeleteCategory(cat.id); }} title="确认删除"><Check size={12} /></button>
+                        <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onCancelDelete(); }} title="取消"><X size={12} /></button>
+                      </div>
+                    ) : (
+                      <div className="sidebar-item-actions">
+                        <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onStartEdit(cat.id); }} title="重命名"><SettingsIcon size={12} /></button>
+                        <button className="icon-btn danger" onClick={(e) => { e.stopPropagation(); onAskDelete(cat.id); }} title="删除"><Trash2 size={12} /></button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FolderCard({ folder, onOpen, dropTarget, onDropTargetEnter, onDropTargetLeave }: {
+  folder: FolderCardModel;
+  onOpen: () => void;
+  dropTarget: string | null;
+  onDropTargetEnter: (type: string, id: string, agentId?: string) => void;
+  onDropTargetLeave: () => void;
+}) {
+  const isCategory = folder.kind === "category";
+  const dropKey = isCategory && folder.categoryId ? `cat:${folder.categoryId}` : null;
+  const isActive = dropKey && dropTarget === dropKey;
+  const confident = !!folder.repo && folder.repoShare / folder.total >= 0.5;
+  return (
+    <article
+      className={`folder-card${isCategory ? " folder-card-cat" : ""}${isActive ? " drop-active" : ""}`}
+      onClick={onOpen}
+      title={`打开${isCategory ? "分类" : "合集"}「${folder.name}」`}
+      onMouseEnter={isCategory && folder.categoryId ? () => onDropTargetEnter("cat", folder.categoryId!, folder.agentId) : undefined}
+      onMouseLeave={isCategory ? onDropTargetLeave : undefined}
+    >
+      <div className="folder-card-top">
+        <Folder size={20} className="folder-card-icon" />
+        <span className="folder-card-count">{folder.count}</span>
+      </div>
+      <h2 className="folder-card-name">{folder.name}</h2>
+      <div className="folder-card-foot">
+        {isCategory ? (
+          <span className="folder-card-repo muted">{isActive ? "拖到这里归类" : "我的分类"}</span>
+        ) : folder.repo ? (
+          confident ? (
+            <span className="folder-card-repo"><Github size={11} /> {folder.repo}</span>
+          ) : (
+            <span className="folder-card-repo mixed"><Github size={11} /> 混合来源</span>
+          )
+        ) : (
+          <span className="folder-card-repo muted">本地合集</span>
+        )}
+      </div>
+    </article>
+  );
+}
+
 function SkillCard({
   skill,
   agents,
   agentIds,
-  update,
+  provenance,
   onOpen,
   onSync,
   onToggleStar,
-  onContextMenu
+  onContextMenu,
+  onMouseDown,
+  onRemoveFromFolder
 }: {
   skill: Skill;
   agents: Agent[];
   agentIds: string[];
-  update?: GithubUpdate;
+  provenance?: SkillProvenance;
   onOpen: (skill: Skill) => void;
   onSync: (skill: Skill) => void;
   onToggleStar: (skill: Skill) => void;
   onContextMenu: (event: React.MouseEvent, skill: Skill) => void;
+  onMouseDown?: (e: React.MouseEvent) => void;
+  onRemoveFromFolder?: () => void;
 }) {
   const canSync = agents.length > 1;
   return (
-    <article className="skill-card" onClick={() => onOpen(skill)} onContextMenu={(e) => onContextMenu(e, skill)}>
-      {update?.hasUpdate && (
-        <div className="update-badge" title={`有更新：${update.summary.join(", ")}`}>
-          <CloudDownload size={13} /> 更新可用
-        </div>
-      )}
+    <article
+      className="skill-card"
+      onClick={() => onOpen(skill)}
+      onContextMenu={(e) => onContextMenu(e, skill)}
+      onMouseDown={onMouseDown}
+    >
       <div className="card-head">
         <button className={skill.starred ? "icon-button starred" : "icon-button"} onClick={(e) => { e.stopPropagation(); onToggleStar(skill); }} title="收藏">
           <Star size={17} />
         </button>
+        {onRemoveFromFolder && (
+          <button className="icon-button folder-remove" onClick={(e) => { e.stopPropagation(); onRemoveFromFolder(); }} title="从文件夹移除">
+            <X size={14} />
+          </button>
+        )}
       </div>
       <div className="card-title">
-        <h2>{skill.name}</h2>
+        <div className="card-title-row">
+          <h2>{skill.name}</h2>
+          <ProvenanceBadge provenance={provenance} />
+        </div>
         {skill.displayName && skill.displayName !== skill.name && (
           <span className="skill-subtitle">{skill.displayName}</span>
         )}
@@ -1408,7 +2152,14 @@ function CategoryPicker({
   );
 }
 
-function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (settings: Settings) => void }) {
+function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScoped, onShowProvenanceInfo }: {
+  settings: Settings;
+  onChange: (settings: Settings) => void;
+  agents: Agent[];
+  traceProgress: { done: number; total: number } | null;
+  onTraceScoped: () => void;
+  onShowProvenanceInfo: () => void;
+}) {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
   const [editingTag, setEditingTag] = useState<Tag>({ id: "", name: "", color: "#7dd3fc" });
@@ -1583,6 +2334,34 @@ function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (
         <input type="checkbox" checked={settings.snapshotsEnabled} onChange={(event) => onChange({ ...settings, snapshotsEnabled: event.target.checked })} />
         <span>保存时创建本地快照</span>
       </label>
+      <div className="setting-row">
+        <div className="setting-copy">
+          <BadgeCheck size={18} />
+          <strong>Skill 溯源范围</strong>
+          <span>
+            对照 skills.sh 自动判断每个 Skill 的来源；可限定只对某个 Agent 的 Skill 溯源以加快首次速度。
+            <button type="button" className="link-button" onClick={onShowProvenanceInfo}>了解溯源逻辑</button>
+          </span>
+        </div>
+        <CustomSelect
+          value={settings.provenanceAgentId ?? "all"}
+          options={[
+            { value: "all", label: "全部 Agent" },
+            ...agents.map((agent) => ({ value: agent.id, label: agent.name })),
+          ]}
+          onChange={(value) => onChange({ ...settings, provenanceAgentId: value === "all" ? null : value })}
+        />
+      </div>
+      <div className="setting-row">
+        <div className="setting-copy">
+          <RefreshCcw size={18} />
+          <strong>立即溯源</strong>
+          <span>重新检查{settings.provenanceAgentId ? ` ${agentName(agents, settings.provenanceAgentId)} 的` : "所有"} Skill 的来源（结果缓存，平时无需手动触发）。</span>
+        </div>
+        <button className="ghost-button" onClick={onTraceScoped} disabled={traceProgress !== null}>
+          <BadgeCheck size={15} /> {traceProgress ? `溯源中 ${traceProgress.done}/${traceProgress.total}` : "开始溯源"}
+        </button>
+      </div>
       <div className="custom-agent-panel">
         <header>
           <div>
@@ -2005,6 +2784,54 @@ function nextDefaultName(existing: { name: string }[], base: string) {
 
 function agentName(agents: Agent[], agentId: string) {
   return agents.find((agent) => agent.id === agentId)?.name ?? "Unknown";
+}
+
+interface BundleGroup {
+  key: string;
+  name: string;
+  agentId: string;
+  repo: string | null;
+  repoShare: number;
+  total: number;
+  skills: Skill[];
+}
+
+/// A navigable "folder": either an auto-detected install-dir cluster (read-only)
+/// or a user-defined manual category (editable + drop target).
+type FolderRef =
+  | { kind: "auto"; key: string }
+  | { kind: "category"; agentId: string; categoryId: string };
+
+/// Display model for a folder card in the overview grid.
+interface FolderCardModel {
+  ref: FolderRef;
+  kind: "auto" | "category";
+  name: string;
+  count: number;
+  agentId: string;
+  categoryId?: string;
+  repo: string | null;
+  repoShare: number;
+  total: number;
+}
+
+/// Derive a skill's "bundle root": the first path segment under its agent's
+/// skills directory (e.g. `.../.claude/skills/gstack/.cursor/...` -> `gstack`).
+/// Bundles installed together share this root; a standalone skill's root is just
+/// its own folder name.
+function bundleRootOf(skill: Skill, agents: Agent[]): string {
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const dir = norm(skill.dirPath);
+  const agent = agents.find((a) => a.id === skill.agentId);
+  for (const root of agent?.skillDirPaths ?? []) {
+    const prefix = norm(root) + "/";
+    if (dir.startsWith(prefix)) {
+      const first = dir.slice(prefix.length).split("/")[0];
+      if (first) return first;
+    }
+  }
+  const parts = dir.split("/");
+  return parts[parts.length - 1] || skill.name;
 }
 
 function agentInitials(name: string) {
