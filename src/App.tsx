@@ -375,6 +375,12 @@ export default function App() {
     void boot();
   }, []);
 
+  // Keep the native window appearance in sync with the in-app theme so the macOS
+  // sidebar vibrancy renders light/dark to match (it follows NSAppearance, not CSS).
+  useEffect(() => {
+    void api.setWindowTheme(settings.theme);
+  }, [settings.theme]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
