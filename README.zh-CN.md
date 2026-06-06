@@ -17,6 +17,42 @@ SkillAnvil 是一款基于 Tauri 2 的桌面工作台，用于管理本地的 Co
 - **自带翻译接口（BYO）** —— 流式输出
 - **托盘 + 全局快捷键** —— 随时唤起
 
+## 安装
+
+从 [Releases 页面](https://github.com/LioraRndr/SkillAnvil/releases) 下载对应平台的安装包：
+
+| 平台 | 文件 |
+|------|------|
+| macOS（Apple Silicon + Intel） | `SkillAnvil_<版本>_universal.dmg` |
+| Windows | `SkillAnvil_<版本>_x64-setup.exe` 或 `SkillAnvil_<版本>_x64_en-US.msi` |
+| Linux | `SkillAnvil_<版本>_amd64.AppImage`、`.deb` 或 `.rpm` |
+
+> **说明：** 发布的安装包目前**未做代码签名**，所以首次打开时系统会弹出安全提示。这是未签名
+> 软件的正常现象，按下面的步骤即可放行。
+
+### macOS
+
+1. 打开 DMG，把 **SkillAnvil** 拖进 **应用程序（Applications）**。
+2. 首次打开会被拦截，提示 *“SkillAnvil 已损坏，无法打开”* 或 *“无法打开，因为
+   Apple 无法检查其是否包含恶意软件”*。在终端执行一次以下命令清除隔离标记，然后正常打开：
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/SkillAnvil.app
+   ```
+
+   或者：先尝试打开，再到 **系统设置 → 隐私与安全性**，点击 **仍要打开**。
+
+### Windows
+
+直接运行 `.exe` 或 `.msi`。若 SmartScreen 弹出 *“Windows 已保护你的电脑”*，
+点击 **更多信息 → 仍要运行**。
+
+### Linux
+
+- **AppImage：** `chmod +x SkillAnvil_*.AppImage`，然后运行。
+- **deb：** `sudo apt install ./SkillAnvil_*_amd64.deb`
+- **rpm：** `sudo dnf install ./SkillAnvil-*.x86_64.rpm`
+
 ## 技术栈
 
 - Tauri 2.x + Rust 后端
