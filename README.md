@@ -1,5 +1,7 @@
 # SkillAnvil
 
+**English** · [简体中文](README.zh-CN.md)
+
 SkillAnvil is a Tauri 2 desktop workbench for managing local Coding Agent Skill
 directories. It scans the skill folders of agents like Claude Code, Codex,
 Antigravity, and others; lets you browse, edit, tag, clone, and sync skills
