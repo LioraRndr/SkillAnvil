@@ -33,6 +33,7 @@ import {
   ShieldAlert,
   Sparkles,
   Star,
+  Tags,
   Trash2,
   X
 } from "lucide-react";
@@ -89,7 +90,7 @@ function AgentIcon({ icon, size = 16 }: { icon: string; size?: number }) {
   return <FolderOpen size={size} />;
 }
 import { api } from "./api";
-import type { Agent, ProvenanceStatus, ReadFileResult, ScanIssue, Settings, Skill, SkillCategory, SkillFilter, SkillProvenance, Snapshot, SyncTargetStatus, Tag, TranslationConfig } from "./types";
+import type { Agent, ProvenanceStatus, ReadFileResult, ScanIssue, Settings, Skill, SkillCategory, SkillFilter, SkillProvenance, Snapshot, SyncTargetStatus, Tag, TranslationConfig, UpdateInfo } from "./types";
 
 type ViewMode = "grid" | "list";
 type Pane = "skills" | "settings";
@@ -186,6 +187,27 @@ export default function App() {
   const [confirmDeleteCategoryId, setConfirmDeleteCategoryId] = useState<string | null>(null);
   const [confirmDeleteTagId, setConfirmDeleteTagId] = useState<string | null>(null);
   const [cloningSkill, setCloningSkill] = useState<Skill | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+
+  // Check for updates on startup (after a short delay so the UI settles)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      api.checkForUpdates().then((info) => {
+        setUpdateInfo(info);
+      }).catch(() => {
+        // Silently ignore — GitHub may be unreachable
+      });
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  function dismissUpdatePanel() {
+    if (updateInfo) {
+      api.dismissUpdate(updateInfo.latestVersion).catch(() => {});
+      setUpdateDismissed(true);
+    }
+  }
 
   function showToast(message: string, type: ToastType = "success") {
     const id = ++toastIdSeq;
@@ -1130,6 +1152,7 @@ export default function App() {
     const folderRemove = openFolder?.kind === "category"
       ? () => removeSkillFromCategory(skill, openFolder.agentId, openFolder.categoryId)
       : undefined;
+    const compact = viewMode === "list";
     return (
       <SkillCard
         key={skill.id}
@@ -1141,6 +1164,7 @@ export default function App() {
         onSync={openSyncPanel}
         onToggleStar={toggleStar}
         onContextMenu={handleContextMenu}
+        compact={compact}
         onMouseDown={(e) => onSkillMouseDown(skill, e)}
         onRemoveFromFolder={folderRemove}
         translateOn={translateCards}
@@ -1442,7 +1466,7 @@ export default function App() {
               </button>
               <div className="segmented">
                 <button className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")} title="网格"><Grid2X2 size={16} /></button>
-                <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="列表"><List size={16} /></button>
+                <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="紧凑"><List size={16} /></button>
               </div>
             </div>
           )}
@@ -1476,6 +1500,26 @@ export default function App() {
           </div>
         )}
 
+        {updateInfo && !updateDismissed && updateInfo.hasUpdate && (
+          <div className="update-banner">
+            <div className="update-banner-body">
+              <Sparkles size={18} />
+              <div className="update-banner-text">
+                <strong>SkillAnvil {updateInfo.latestVersion} 已发布</strong>
+                <span>当前版本 {updateInfo.currentVersion} — 建议更新以获取最新功能和修复。</span>
+              </div>
+            </div>
+            <div className="update-banner-actions">
+              <button className="ghost-button" onClick={() => { api.openUrl(updateInfo.assetUrl || updateInfo.releaseUrl); }}>
+                下载
+              </button>
+              <button className="ghost-button" onClick={dismissUpdatePanel}>
+                忽略此版本
+              </button>
+            </div>
+          </div>
+        )}
+
         {pane === "settings" && !activeTab ? (
           <SettingsPanel
             settings={settings}
@@ -1484,6 +1528,9 @@ export default function App() {
             traceProgress={traceProgress}
             onTraceScoped={() => void autoTraceProvenance(skills, provenance, true, settings.provenanceAgentId)}
             onShowProvenanceInfo={() => setShowProvenanceInfo(true)}
+            updateInfo={updateInfo}
+            updateDismissed={updateDismissed}
+            onDismissUpdate={dismissUpdatePanel}
           />
         ) : activeTab ? (
           <section className="editor-layout">
@@ -2156,7 +2203,8 @@ function SkillCard({
   onRemoveFromFolder,
   translateOn,
   descriptionZh,
-  onRequestZh
+  onRequestZh,
+  compact = false
 }: {
   skill: Skill;
   agents: Agent[];
@@ -2171,11 +2219,33 @@ function SkillCard({
   translateOn?: boolean;
   descriptionZh?: string;
   onRequestZh?: (skill: Skill) => void;
+  compact?: boolean;
 }) {
   const canSync = agents.length > 1;
   useEffect(() => {
     if (translateOn && !descriptionZh && onRequestZh) onRequestZh(skill);
   }, [translateOn, descriptionZh, skill, onRequestZh]);
+  if (compact) {
+    const subtitle = skill.displayName && skill.displayName !== skill.name
+      ? skill.displayName
+      : skill.description || "";
+    const agentName = agents.find(a => a.id === agentIds[0])?.name ?? "";
+    const sub = [subtitle, agentName].filter(Boolean).join(" · ");
+    return (
+      <article
+        className="skill-card compact"
+        onClick={() => onOpen(skill)}
+        onContextMenu={(e) => onContextMenu(e, skill)}
+        onMouseDown={onMouseDown}
+      >
+        <div className="compact-title">
+          <h2>{skill.name}</h2>
+          <ProvenanceBadge provenance={provenance} />
+        </div>
+        <span className="compact-sub" title={sub}>{sub}</span>
+      </article>
+    );
+  }
   return (
     <article
       className="skill-card"
@@ -2310,13 +2380,16 @@ function CategoryPicker({
   );
 }
 
-function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScoped, onShowProvenanceInfo }: {
+function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScoped, onShowProvenanceInfo, updateInfo, updateDismissed, onDismissUpdate }: {
   settings: Settings;
   onChange: (settings: Settings) => void;
   agents: Agent[];
   traceProgress: { done: number; total: number } | null;
   onTraceScoped: () => void;
   onShowProvenanceInfo: () => void;
+  updateInfo: UpdateInfo | null;
+  updateDismissed: boolean;
+  onDismissUpdate: () => void;
 }) {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
@@ -2333,6 +2406,21 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
   const [detecting, setDetecting] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [detectError, setDetectError] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [checkUpdateResult, setCheckUpdateResult] = useState<UpdateInfo | null>(null);
+
+  async function runUpdateCheck() {
+    setCheckingUpdate(true);
+    setCheckUpdateResult(null);
+    try {
+      const result = await api.checkForUpdates();
+      setCheckUpdateResult(result);
+    } catch {
+      setCheckUpdateResult(null);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
 
   function setTranslation(patch: Partial<TranslationConfig>) {
     onChange({ ...settings, translation: { ...settings.translation, ...patch } });
@@ -2620,9 +2708,47 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
           </div>
         )}
       </div>
+      <div className="setting-row">
+        <div className="setting-copy">
+          <Sparkles size={18} />
+          <strong>版本更新</strong>
+          <span>当前版本 {updateInfo?.currentVersion ?? "—"}。启动时自动检查，也可手动触发。</span>
+        </div>
+        <div className="setting-action">
+          <button className="ghost-button" onClick={() => void runUpdateCheck()} disabled={checkingUpdate}>
+            <RefreshCcw size={14} /> {checkingUpdate ? "检查中…" : "检查更新"}
+          </button>
+          {checkUpdateResult ? (
+            checkUpdateResult.hasUpdate ? (
+              <>
+                <span className="test-chip ok">✓ 发现新版本 {checkUpdateResult.latestVersion}</span>
+                <button className="ghost-button" onClick={() => { api.openUrl(checkUpdateResult.assetUrl || checkUpdateResult.releaseUrl); }}>
+                  下载
+                </button>
+              </>
+            ) : (
+              <span className="test-chip ok">✓ 已是最新版本</span>
+            )
+          ) : updateInfo && !updateDismissed && updateInfo.hasUpdate ? (
+            <>
+              <span className="test-chip ok">✓ 发现新版本 {updateInfo.latestVersion}</span>
+              <button className="ghost-button" onClick={() => { api.openUrl(updateInfo.assetUrl || updateInfo.releaseUrl); }}>
+                下载
+              </button>
+              <button className="ghost-button" onClick={onDismissUpdate}>
+                忽略
+              </button>
+            </>
+          ) : null}
+          {!checkUpdateResult && checkingUpdate && (
+            <span className="test-chip">检查中…</span>
+          )}
+        </div>
+      </div>
       <div className="custom-agent-panel">
         <header>
-          <div>
+          <div className="setting-copy">
+            <Tags size={18} />
             <strong>标签管理</strong>
             <span>管理用于分类 Skill 的标签。</span>
           </div>
@@ -2665,7 +2791,8 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
       </div>
       <div className="custom-agent-panel">
         <header>
-          <div>
+          <div className="setting-copy">
+            <Folder size={18} />
             <strong>Agent 目录</strong>
             <span>点击 Agent 图标查看或编辑 Skill 路径；启用后会显示在左侧。</span>
           </div>
