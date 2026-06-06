@@ -247,6 +247,19 @@ struct ScanResult {
     scan_errors: Vec<ScanIssue>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    current_version: String,
+    latest_version: String,
+    has_update: bool,
+    /// Direct download URL for the platform-appropriate asset (if found)
+    asset_url: String,
+    release_url: String,
+    release_notes: String,
+    published_at: String,
+}
+
 struct AppState {
     db_path: PathBuf,
     data_dir: PathBuf,
@@ -302,7 +315,9 @@ fn main() {
             translate_markdown,
             translate_stream,
             test_translation_config,
-            list_translation_models
+            list_translation_models,
+            check_for_updates,
+            dismiss_update
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SkillAnvil");
@@ -1475,6 +1490,142 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
     })
 }
 
+#[tauri::command]
+async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let client = reqwest::Client::builder()
+        .user_agent("SkillAnvil")
+        .build()?;
+
+    let response = client
+        .get("https://api.github.com/repos/SkillAnvil/SkillAnvil/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await?;
+
+    let empty = || UpdateInfo {
+        current_version: current_version.clone(),
+        latest_version: String::new(),
+        has_update: false,
+        asset_url: String::new(),
+        release_url: String::new(),
+        release_notes: String::new(),
+        published_at: String::new(),
+    };
+
+    if !response.status().is_success() {
+        return Ok(empty());
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let tag = json["tag_name"].as_str().unwrap_or("").to_string();
+    let latest_version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
+    let release_url = json["html_url"].as_str().unwrap_or("").to_string();
+    let release_notes = json["body"].as_str().unwrap_or("").to_string();
+    let published_at = json["published_at"].as_str().unwrap_or("").to_string();
+
+    // Pick the asset that matches the current platform so the user can
+    // download the installer directly instead of browsing the release page.
+    let asset_url = pick_asset(&json);
+
+    // Check if user already dismissed this version
+    let conn = Connection::open(&state.db_path)?;
+    let dismissed: bool = conn
+        .query_row(
+            "select count(*) from dismissed_update where version = ?1",
+            params![latest_version],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+
+    if dismissed {
+        return Ok(UpdateInfo {
+            asset_url,
+            release_url,
+            release_notes,
+            published_at,
+            ..empty()
+        });
+    }
+
+    let has_update =
+        compare_versions(&latest_version, &current_version) == std::cmp::Ordering::Greater;
+
+    Ok(UpdateInfo {
+        current_version,
+        latest_version,
+        has_update,
+        asset_url,
+        release_url,
+        release_notes,
+        published_at,
+    })
+}
+
+#[tauri::command]
+fn dismiss_update(state: State<'_, AppState>, version: String) -> AppResult<()> {
+    let conn = Connection::open(&state.db_path)?;
+    conn.execute(
+        "insert or ignore into dismissed_update(version) values(?1)",
+        params![version],
+    )?;
+    Ok(())
+}
+
+/// Pick the release asset best matching the current platform so the user
+/// can download the installer with a single click (no release-page browsing).
+fn pick_asset(release: &serde_json::Value) -> String {
+    let assets = match release["assets"].as_array() {
+        Some(a) => a,
+        None => return String::new(),
+    };
+
+    // Extension priority per platform — first match wins
+    #[cfg(target_os = "macos")]
+    let exts: &[&str] = &[".dmg", ".app.tar.gz"];
+    #[cfg(target_os = "windows")]
+    let exts: &[&str] = &[".msi", ".exe"];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let exts: &[&str] = &[".AppImage", ".deb", ".rpm"];
+
+    for asset in assets {
+        let name = asset["name"].as_str().unwrap_or("").to_lowercase();
+        let url = asset["browser_download_url"].as_str().unwrap_or("");
+        if exts.iter().any(|ext| name.ends_with(ext)) && !url.is_empty() {
+            return url.to_string();
+        }
+    }
+
+    // Fallback: return the first download URL if no platform match
+    assets
+        .first()
+        .and_then(|a| a["browser_download_url"].as_str())
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .collect()
+    };
+    let va = parse(a);
+    let vb = parse(b);
+    for i in 0..va.len().max(vb.len()) {
+        let na = va.get(i).copied().unwrap_or(0);
+        let nb = vb.get(i).copied().unwrap_or(0);
+        match na.cmp(&nb) {
+            std::cmp::Ordering::Equal => continue,
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 fn init_db(path: &Path) -> AppResult<()> {
     let conn = Connection::open(path)?;
     // WAL lets short-lived reader/writer connections coexist without blocking,
@@ -1550,6 +1701,9 @@ fn init_db(path: &Path) -> AppResult<()> {
             cache_key text primary key,
             content text not null,
             created_at text not null
+        );
+        create table if not exists dismissed_update(
+            version text primary key
         );
         "#,
     )?;

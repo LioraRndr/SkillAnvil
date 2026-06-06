@@ -12,7 +12,8 @@ import type {
   SyncTargetStatus,
   Tag,
   Theme,
-  TranslationConfig
+  TranslationConfig,
+  UpdateInfo
 } from "./types";
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
@@ -65,5 +66,7 @@ export const api = {
   testTranslationConfig: (config: TranslationConfig) =>
     call<{ ok: boolean; latencyMs: number; message: string }>("test_translation_config", { config }),
   listTranslationModels: (config: TranslationConfig) =>
-    call<string[]>("list_translation_models", { config })
+    call<string[]>("list_translation_models", { config }),
+  checkForUpdates: () => call<UpdateInfo>("check_for_updates"),
+  dismissUpdate: (version: string) => call<void>("dismiss_update", { version })
 };

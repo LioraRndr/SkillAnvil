@@ -122,6 +122,17 @@ export interface ProvenanceCandidate {
   similarity?: number | null;
 }
 
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  /** Direct download URL for the platform-appropriate asset */
+  assetUrl: string;
+  releaseUrl: string;
+  releaseNotes: string;
+  publishedAt: string;
+}
+
 export interface SkillProvenance {
   skillId: string;
   status: ProvenanceStatus;

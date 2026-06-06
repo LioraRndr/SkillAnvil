@@ -740,6 +740,46 @@ button {
   background: color-mix(in srgb, var(--warn) 12%, transparent);
 }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 7px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  flex-wrap: wrap;
+}
+
+.update-banner-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.update-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.update-banner-text strong {
+  font-size: 14px;
+}
+
+.update-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .skill-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
@@ -747,8 +787,8 @@ button {
 }
 
 .skill-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
   gap: 10px;
 }
 
@@ -776,8 +816,33 @@ button {
   display: none;
 }
 
-.skill-list .skill-card {
-  min-height: 112px;
+.skill-card.compact {
+  min-height: unset;
+  padding: 10px 14px;
+  gap: 2px;
+  justify-content: center;
+}
+
+.compact-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.compact-title h2 {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-sub {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .skill-card:hover {
@@ -2744,6 +2809,50 @@ html.is-macos body {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.setting-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.update-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.update-panel > header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.update-panel > header strong {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.update-panel > header span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.update-panel > header .ghost-button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.update-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .test-chip {
