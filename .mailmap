@@ -1,0 +1,3 @@
+# Normalize commit author identities for a clean public history.
+# Maps the local-hostname identity onto the canonical one.
+LioraRndr <valirondz@gmail.com> LiorarRndr <render@LiorarRndrs-MacBook-Pro.local>
