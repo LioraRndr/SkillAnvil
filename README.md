@@ -19,6 +19,46 @@ your own OpenAI-compatible or Anthropic-native endpoint.
 - **BYO translation** (bring your own endpoint) with streaming output
 - **Tray + global shortcut** for instant access
 
+## Installation
+
+Download the installer for your platform from the
+[Releases page](https://github.com/LioraRndr/SkillAnvil/releases):
+
+| Platform | File |
+|----------|------|
+| macOS (Apple Silicon + Intel) | `SkillAnvil_<version>_universal.dmg` |
+| Windows | `SkillAnvil_<version>_x64-setup.exe` or `SkillAnvil_<version>_x64_en-US.msi` |
+| Linux | `SkillAnvil_<version>_amd64.AppImage`, `.deb`, or `.rpm` |
+
+> **Note:** release builds are not yet code-signed, so your OS will warn you the
+> first time you open the app. This is expected for unsigned software — the steps
+> below clear the warning.
+
+### macOS
+
+1. Open the DMG and drag **SkillAnvil** into **Applications**.
+2. The first launch is blocked with *"SkillAnvil is damaged and can't be opened"*
+   or *"cannot be opened because Apple cannot check it for malicious software."*
+   Clear the quarantine flag once, then open normally:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/SkillAnvil.app
+   ```
+
+   Alternatively, try to open it, then go to **System Settings → Privacy &
+   Security** and click **Open Anyway**.
+
+### Windows
+
+Run the `.exe` or `.msi`. If SmartScreen shows *"Windows protected your PC"*,
+click **More info → Run anyway**.
+
+### Linux
+
+- **AppImage:** `chmod +x SkillAnvil_*.AppImage`, then run it.
+- **deb:** `sudo apt install ./SkillAnvil_*_amd64.deb`
+- **rpm:** `sudo dnf install ./SkillAnvil-*.x86_64.rpm`
+
 ## Stack
 
 - Tauri 2.x + Rust backend
