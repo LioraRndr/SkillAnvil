@@ -268,7 +268,6 @@ struct AppState {
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let state = init_state()?;
@@ -700,8 +699,10 @@ async fn trace_one_provenance(
     };
 
     // Keep only exact-name matches, most-installed first.
-    let mut exact: Vec<ProvenanceCandidate> =
-        candidates.into_iter().filter(|c| c.skill_id == name).collect();
+    let mut exact: Vec<ProvenanceCandidate> = candidates
+        .into_iter()
+        .filter(|c| c.skill_id == name)
+        .collect();
     exact.sort_by(|a, b| b.installs.cmp(&a.installs));
     exact.truncate(3);
 
@@ -752,8 +753,17 @@ async fn trace_one_provenance(
 
     let (status, repo, installs, content_match) = if verified {
         let best = &exact[best_idx.unwrap()];
-        let label = if best_sim >= 0.999 { "identical" } else { "differs" };
-        ("verified".to_string(), best.repo.clone(), best.installs, Some(label.to_string()))
+        let label = if best_sim >= 0.999 {
+            "identical"
+        } else {
+            "differs"
+        };
+        (
+            "verified".to_string(),
+            best.repo.clone(),
+            best.installs,
+            Some(label.to_string()),
+        )
     } else if dominant {
         ("likely".to_string(), top_repo, top_installs, None)
     } else {
@@ -802,7 +812,10 @@ async fn search_registry(
         break res;
     };
     if !res.status().is_success() {
-        return Err(AppError::Message(format!("skills.sh 返回 {}", res.status())));
+        return Err(AppError::Message(format!(
+            "skills.sh 返回 {}",
+            res.status()
+        )));
     }
     let value: serde_json::Value = res.json().await?;
     let mut out = Vec::new();
@@ -844,7 +857,12 @@ async fn fetch_upstream_skill_md(
     ];
     for rel in &rel_paths {
         let url = format!("https://raw.githubusercontent.com/{repo}/HEAD/{rel}");
-        if let Ok(res) = client.get(&url).header("User-Agent", "SkillAnvil").send().await {
+        if let Ok(res) = client
+            .get(&url)
+            .header("User-Agent", "SkillAnvil")
+            .send()
+            .await
+        {
             if res.status().is_success() {
                 if let Ok(text) = res.text().await {
                     return Some(text);
@@ -1280,7 +1298,9 @@ async fn translate_markdown(
     content: String,
 ) -> AppResult<TranslationResult> {
     let cfg = load_settings(&state.db_path)?.translation;
-    if cfg.base_url.trim().is_empty() || cfg.api_key.trim().is_empty() || cfg.model.trim().is_empty()
+    if cfg.base_url.trim().is_empty()
+        || cfg.api_key.trim().is_empty()
+        || cfg.model.trim().is_empty()
     {
         return Err(AppError::Message(
             "翻译未配置：请在设置里填写接口、Key 和模型。".into(),
@@ -1314,7 +1334,10 @@ async fn translate_markdown(
         );
     }
 
-    Ok(TranslationResult { text, cached: false })
+    Ok(TranslationResult {
+        text,
+        cached: false,
+    })
 }
 
 #[tauri::command]
@@ -1324,7 +1347,9 @@ async fn translate_stream(
     on_chunk: tauri::ipc::Channel<String>,
 ) -> AppResult<TranslationResult> {
     let cfg = load_settings(&state.db_path)?.translation;
-    if cfg.base_url.trim().is_empty() || cfg.api_key.trim().is_empty() || cfg.model.trim().is_empty()
+    if cfg.base_url.trim().is_empty()
+        || cfg.api_key.trim().is_empty()
+        || cfg.model.trim().is_empty()
     {
         return Err(AppError::Message(
             "翻译未配置：请在设置里填写接口、Key 和模型。".into(),
@@ -1359,7 +1384,10 @@ async fn translate_stream(
         );
     }
 
-    Ok(TranslationResult { text, cached: false })
+    Ok(TranslationResult {
+        text,
+        cached: false,
+    })
 }
 
 #[tauri::command]
@@ -1499,7 +1527,7 @@ async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> 
         .build()?;
 
     let response = client
-        .get("https://api.github.com/repos/SkillAnvil/SkillAnvil/releases/latest")
+        .get("https://api.github.com/repos/LioraRndr/SkillAnvil/releases/latest")
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
@@ -1608,11 +1636,8 @@ fn pick_asset(release: &serde_json::Value) -> String {
 }
 
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse = |v: &str| -> Vec<u64> {
-        v.split('.')
-            .filter_map(|s| s.parse::<u64>().ok())
-            .collect()
-    };
+    let parse =
+        |v: &str| -> Vec<u64> { v.split('.').filter_map(|s| s.parse::<u64>().ok()).collect() };
     let va = parse(a);
     let vb = parse(b);
     for i in 0..va.len().max(vb.len()) {
@@ -2019,7 +2044,8 @@ fn normalize_settings(mut settings: Settings) -> Settings {
         return settings;
     }
     let defaults = default_agent_configs();
-    let default_ids: std::collections::HashSet<String> = defaults.iter().map(|a| a.id.clone()).collect();
+    let default_ids: std::collections::HashSet<String> =
+        defaults.iter().map(|a| a.id.clone()).collect();
     let mut merged = defaults;
     for existing in settings.custom_agents {
         if let Some(target) = merged.iter_mut().find(|agent| agent.id == existing.id) {
@@ -2052,9 +2078,21 @@ fn default_settings() -> Settings {
 
 fn default_custom_tags() -> Vec<Tag> {
     vec![
-        Tag { id: "writing".into(), name: "写作".into(), color: "#7dd3fc".into() },
-        Tag { id: "coding".into(), name: "开发".into(), color: "#86efac".into() },
-        Tag { id: "review".into(), name: "审查".into(), color: "#fcd34d".into() },
+        Tag {
+            id: "writing".into(),
+            name: "写作".into(),
+            color: "#7dd3fc".into(),
+        },
+        Tag {
+            id: "coding".into(),
+            name: "开发".into(),
+            color: "#86efac".into(),
+        },
+        Tag {
+            id: "review".into(),
+            name: "审查".into(),
+            color: "#fcd34d".into(),
+        },
     ]
 }
 
@@ -2486,29 +2524,11 @@ fn show_path_in_file_manager(path: &Path) -> AppResult<()> {
 }
 
 fn open_external_url(url: &str) -> AppResult<()> {
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = Command::new("open");
-        c.arg(url);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut c = Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-    let status = command.status()?;
-    if !status.success() {
-        return Err(AppError::Message("无法打开链接。".into()));
-    }
-    Ok(())
+    // Delegate to the `open` crate, which invokes the platform launcher safely
+    // (ShellExecuteW on Windows) instead of routing an untrusted URL through
+    // `cmd /C start`, where shell metacharacters (`&`, `|`, …) could inject
+    // commands. The caller (`open_url`) already restricts the scheme to http(s).
+    open::that(url).map_err(|err| AppError::Message(format!("无法打开链接：{err}")))
 }
 
 fn hash_dir(path: &Path) -> AppResult<String> {
@@ -2553,4 +2573,113 @@ fn format_time(time: std::time::SystemTime) -> String {
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compare_versions_orders_semver() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("1.2.0", "1.1.9"), Ordering::Greater);
+        assert_eq!(compare_versions("0.1.0", "0.1.0"), Ordering::Equal);
+        assert_eq!(compare_versions("1.0", "1.0.1"), Ordering::Less);
+        // Missing trailing components are treated as zero.
+        assert_eq!(compare_versions("2", "2.0.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn line_similarity_detects_identical_and_disjoint() {
+        let a = "alpha\nbeta\ngamma";
+        assert!((line_similarity(a, a) - 1.0).abs() < 1e-9);
+        assert_eq!(line_similarity("alpha\nbeta", "x\ny\nz"), 0.0);
+        assert_eq!(line_similarity("", "anything"), 0.0);
+    }
+
+    #[test]
+    fn parse_frontmatter_extracts_metadata_and_body() {
+        let doc = "---\nname: my-skill\nversion: 0.2.0\n---\n\n# Title\nbody";
+        let (meta, body) = parse_frontmatter(doc);
+        assert_eq!(meta.get("name").and_then(|v| v.as_str()), Some("my-skill"));
+        assert!(body.starts_with("# Title"));
+    }
+
+    #[test]
+    fn parse_frontmatter_passes_through_plain_markdown() {
+        let doc = "# No frontmatter\ntext";
+        let (meta, body) = parse_frontmatter(doc);
+        assert!(meta.is_empty());
+        assert_eq!(body, doc);
+    }
+
+    #[test]
+    fn validate_name_rejects_path_separators() {
+        assert!(validate_name("good-name").is_ok());
+        assert!(validate_name("../escape").is_err());
+        assert!(validate_name("a/b").is_err());
+        assert!(validate_name("   ").is_err());
+    }
+
+    #[test]
+    fn expand_home_path_resolves_tilde() {
+        let home = Path::new("/home/alice");
+        assert_eq!(expand_home_path("~", home), "/home/alice");
+        assert_eq!(
+            expand_home_path("~/.config/x", home),
+            "/home/alice/.config/x"
+        );
+        assert_eq!(expand_home_path("/abs/path", home), "/abs/path");
+    }
+
+    #[test]
+    fn rewrite_skill_identity_updates_name_fields() {
+        let original = "---\nname: old\ndisplayName: Old\ndescription: keep\n---\n\nbody";
+        let out = rewrite_skill_identity(original, "fresh");
+        assert!(out.contains("name: fresh"));
+        assert!(out.contains("displayName: fresh"));
+        assert!(out.contains("description: keep"));
+        assert!(out.trim_end().ends_with("body"));
+    }
+
+    #[test]
+    fn truncate_str_appends_ellipsis_when_clipping() {
+        assert_eq!(truncate_str("hi", 10), "hi");
+        assert_eq!(truncate_str("hello world", 5).chars().count(), 6);
+    }
+
+    #[test]
+    fn pick_asset_falls_back_to_first_download_url() {
+        let release = serde_json::json!({
+            "assets": [
+                { "name": "notes.txt", "browser_download_url": "https://example.com/notes.txt" }
+            ]
+        });
+        assert_eq!(pick_asset(&release), "https://example.com/notes.txt");
+        let empty = serde_json::json!({ "assets": [] });
+        assert_eq!(pick_asset(&empty), "");
+    }
+
+    #[test]
+    fn extract_api_error_reads_json_message() {
+        let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let msg = extract_api_error(
+            status,
+            "application/json",
+            r#"{"error":{"message":"rate limited"}}"#,
+        );
+        assert!(msg.contains("rate limited"));
+    }
+
+    #[test]
+    fn secure_join_rejects_parent_traversal() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let root = base.to_string_lossy().to_string();
+        // A normal child resolves fine.
+        assert!(secure_join(&root, "child.md").is_ok());
+        // Escaping the root is rejected.
+        assert!(secure_join(&root, "../escape.md").is_err());
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

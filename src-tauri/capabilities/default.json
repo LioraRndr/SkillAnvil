@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "core:window:allow-set-theme",
-    "opener:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered"
