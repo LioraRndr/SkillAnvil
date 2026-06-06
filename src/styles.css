@@ -1291,12 +1291,15 @@ button {
   justify-content: space-between;
   gap: 16px;
   padding: 14px;
+  flex-wrap: nowrap;
 }
 
 .setting-copy {
   display: grid;
-  grid-template-columns: 24px 1fr;
+  grid-template-columns: auto 1fr;
   gap: 5px 12px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .setting-copy span {
@@ -1357,6 +1360,7 @@ button {
   border-radius: 6px;
   color: var(--text);
   background: color-mix(in srgb, var(--panel-solid) 86%, transparent);
+  white-space: nowrap;
   transition:
     border-color 160ms ease,
     background 160ms ease,
@@ -2739,6 +2743,7 @@ html.is-macos body {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .test-chip {

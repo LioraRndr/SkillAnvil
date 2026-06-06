@@ -2555,7 +2555,6 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
           </div>
         </header>
         <div className="setting-row">
-          <div className="setting-copy"><strong>协议</strong></div>
           <CustomSelect
             value={settings.translation.protocol}
             options={[
@@ -2595,8 +2594,16 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
           <button className="ghost-button" onClick={() => void detectModels()} disabled={detecting}>
             {detecting ? "检测中…" : "检测模型"}
           </button>
+          <button className="ghost-button" onClick={() => void runTranslationTest()} disabled={testing}>
+            {testing ? "测试中…" : "测试连接"}
+          </button>
           {detectError && <span className="test-chip err" title={detectError}>✗ {detectError}</span>}
           {!detectError && models.length > 0 && <span className="test-chip ok">✓ 检测到 {models.length} 个模型</span>}
+          {testResult && (
+            <span className={testResult.ok ? "test-chip ok" : "test-chip err"} title={testResult.message}>
+              {testResult.ok ? `✓ ${testResult.latencyMs}ms · ${testResult.message}` : `✗ ${testResult.message}`}
+            </span>
+          )}
         </div>
         {models.length > 0 && (
           <div className="model-pills">
@@ -2612,16 +2619,6 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
             ))}
           </div>
         )}
-        <div className="translate-test">
-          <button className="ghost-button" onClick={() => void runTranslationTest()} disabled={testing}>
-            {testing ? "测试中…" : "测试连接"}
-          </button>
-          {testResult && (
-            <span className={testResult.ok ? "test-chip ok" : "test-chip err"} title={testResult.message}>
-              {testResult.ok ? `✓ ${testResult.latencyMs}ms · ${testResult.message}` : `✗ ${testResult.message}`}
-            </span>
-          )}
-        </div>
       </div>
       <div className="custom-agent-panel">
         <header>
