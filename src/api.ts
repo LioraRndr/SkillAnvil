@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   Agent,
   ReadFileResult,
@@ -9,7 +10,9 @@ import type {
   SkillProvenance,
   Snapshot,
   SyncTargetStatus,
-  Tag
+  Tag,
+  Theme,
+  TranslationConfig
 } from "./types";
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
@@ -43,5 +46,24 @@ export const api = {
   getSnapshots: (skillId: string) => call<Snapshot[]>("get_snapshots", { skillId }),
   restoreSnapshot: (snapshotId: string) => call<ReadFileResult>("restore_snapshot", { snapshotId }),
   getSettings: () => call<Settings>("get_settings"),
-  updateSettings: (settings: Settings) => call<Settings>("update_settings", { settings })
+  updateSettings: (settings: Settings) => call<Settings>("update_settings", { settings }),
+  // Sync the native window appearance to the in-app theme. On macOS the sidebar
+  // vibrancy material (windowEffects "sidebar") renders light/dark according to
+  // the window's NSAppearance, which otherwise follows the system, not our theme —
+  // leaving a dark, washed-out sidebar when the app is light on a dark Mac.
+  setWindowTheme: async (theme: Theme) => {
+    if (!isTauriRuntime) return;
+    await getCurrentWindow().setTheme(theme === "system" ? null : theme);
+  },
+  translateMarkdown: (content: string) =>
+    call<{ text: string; cached: boolean }>("translate_markdown", { content }),
+  translateStream: (content: string, onChunk: (delta: string) => void) => {
+    const channel = new Channel<string>();
+    channel.onmessage = onChunk;
+    return call<{ text: string; cached: boolean }>("translate_stream", { content, onChunk: channel });
+  },
+  testTranslationConfig: (config: TranslationConfig) =>
+    call<{ ok: boolean; latencyMs: number; message: string }>("test_translation_config", { config }),
+  listTranslationModels: (config: TranslationConfig) =>
+    call<string[]>("list_translation_models", { config })
 };

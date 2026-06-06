@@ -89,7 +89,7 @@ function AgentIcon({ icon, size = 16 }: { icon: string; size?: number }) {
   return <FolderOpen size={size} />;
 }
 import { api } from "./api";
-import type { Agent, ProvenanceStatus, ReadFileResult, ScanIssue, Settings, Skill, SkillCategory, SkillFilter, SkillProvenance, Snapshot, SyncTargetStatus, Tag } from "./types";
+import type { Agent, ProvenanceStatus, ReadFileResult, ScanIssue, Settings, Skill, SkillCategory, SkillFilter, SkillProvenance, Snapshot, SyncTargetStatus, Tag, TranslationConfig } from "./types";
 
 type ViewMode = "grid" | "list";
 type Pane = "skills" | "settings";
@@ -110,6 +110,12 @@ type DiffView = {
   currentContent: string;
   snapshotContent: string;
 };
+type TabTranslation = {
+  status: "idle" | "loading" | "done" | "error";
+  text: string;
+  error: string;
+  showing: boolean;
+};
 type Tab = {
   skill: Skill;
   selectedFile: string;
@@ -119,6 +125,7 @@ type Tab = {
   syncTargets: SyncTargetStatus[];
   snapshots: Snapshot[];
   scrollY: number;
+  translation?: TabTranslation;
 };
 
 const defaultTags: Tag[] = [
@@ -128,14 +135,14 @@ const defaultTags: Tag[] = [
 ];
 
 const defaultSettings: Settings = {
-  language: "zh-CN",
   theme: "dark",
   shortcut: navigator.platform.toLowerCase().includes("mac") ? "Cmd+Shift+K" : "Ctrl+Shift+K",
   minimizeToTray: true,
   customAgents: [],
   snapshotsEnabled: true,
   customTags: defaultTags,
-  provenanceAgentId: null
+  provenanceAgentId: null,
+  translation: { protocol: "openai", baseUrl: "", apiKey: "", model: "", targetLang: "zh-CN" }
 };
 
 type ToastType = "success" | "error" | "info";
@@ -148,6 +155,9 @@ export default function App() {
   const [filter, setFilter] = useState<SkillFilter>({});
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [translateCards, setTranslateCards] = useState(false);
+  const [cardZh, setCardZh] = useState<Record<string, string>>({});
+  const cardQueue = useRef<{ queue: Skill[]; active: number; seen: Set<string> }>({ queue: [], active: 0, seen: new Set() });
   const [openFolder, setOpenFolder] = useState<FolderRef | null>(null);
   const dragSkillRef = useRef<Skill | null>(null);
   const mouseDragRef = useRef<{ skill: Skill; chipEl: HTMLElement } | null>(null);
@@ -375,6 +385,12 @@ export default function App() {
     void boot();
   }, []);
 
+  // Keep the native window appearance in sync with the in-app theme so the macOS
+  // sidebar vibrancy renders light/dark to match (it follows NSAppearance, not CSS).
+  useEffect(() => {
+    void api.setWindowTheme(settings.theme);
+  }, [settings.theme]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
@@ -567,7 +583,8 @@ export default function App() {
   }
 
   function changeEditor(value: string) {
-    updateActiveTab({ editorValue: value, saveState: "dirty" });
+    // Editing invalidates any cached translation for this tab.
+    updateActiveTab({ editorValue: value, saveState: "dirty", translation: undefined });
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     const currentTabId = activeTab ? tabId(activeTab.skill, activeTab.selectedFile) : null;
     saveTimerTabId.current = currentTabId;
@@ -588,6 +605,92 @@ export default function App() {
       setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, saveState: "error" as SaveState } : t)));
     }
   }
+
+  async function toggleTranslation() {
+    const tab = activeTab;
+    if (!tab) return;
+    const tr = tab.translation;
+    // Already translated → just flip between 原文 / 译文 (instant, no API call).
+    if (tr && tr.status === "done") {
+      updateActiveTab({ translation: { ...tr, showing: !tr.showing } });
+      return;
+    }
+    if (tr && tr.status === "loading") return;
+    const sourceId = tabId(tab.skill, tab.selectedFile);
+    updateActiveTab({ translation: { status: "loading", text: "", error: "", showing: true } });
+
+    // Throttle live updates: buffer deltas, flush to state at most ~every 90ms.
+    let pending = "";
+    let timer: number | null = null;
+    const flush = () => {
+      timer = null;
+      if (!pending) return;
+      const add = pending;
+      pending = "";
+      setTabs((prev) =>
+        prev.map((t) =>
+          tabId(t.skill, t.selectedFile) === sourceId
+            ? { ...t, translation: { status: "loading", text: (t.translation?.text ?? "") + add, error: "", showing: true } }
+            : t
+        )
+      );
+    };
+
+    try {
+      const res = await api.translateStream(tab.editorValue, (delta) => {
+        pending += delta;
+        if (timer === null) timer = window.setTimeout(flush, 90);
+      });
+      if (timer !== null) window.clearTimeout(timer);
+      setTabs((prev) =>
+        prev.map((t) =>
+          tabId(t.skill, t.selectedFile) === sourceId
+            ? { ...t, translation: { status: "done", text: res.text, error: "", showing: true } }
+            : t
+        )
+      );
+    } catch (err) {
+      if (timer !== null) window.clearTimeout(timer);
+      const message = errorMessage(err);
+      setTabs((prev) =>
+        prev.map((t) =>
+          tabId(t.skill, t.selectedFile) === sourceId
+            ? { ...t, translation: { status: "error", text: "", error: message, showing: false } }
+            : t
+        )
+      );
+      setError(message);
+    }
+  }
+
+  // Lazily translate card descriptions, max 3 in flight, only for cards that
+  // actually render (the grid only mounts visible/filtered cards).
+  const pumpCardZh = useCallback(() => {
+    const c = cardQueue.current;
+    while (c.active < 3 && c.queue.length > 0) {
+      const skill = c.queue.shift()!;
+      c.active++;
+      api
+        .translateMarkdown(skill.description)
+        .then((res) => setCardZh((m) => ({ ...m, [skill.id]: res.text })))
+        .catch(() => c.seen.delete(skill.id))
+        .finally(() => {
+          c.active--;
+          pumpCardZh();
+        });
+    }
+  }, []);
+
+  const requestCardZh = useCallback(
+    (skill: Skill) => {
+      const c = cardQueue.current;
+      if (c.seen.has(skill.id) || !skill.description.trim()) return;
+      c.seen.add(skill.id);
+      c.queue.push(skill);
+      pumpCardZh();
+    },
+    [pumpCardZh]
+  );
 
   async function toggleStar(skill: Skill) {
     try {
@@ -1040,6 +1143,9 @@ export default function App() {
         onContextMenu={handleContextMenu}
         onMouseDown={(e) => onSkillMouseDown(skill, e)}
         onRemoveFromFolder={folderRemove}
+        translateOn={translateCards}
+        descriptionZh={cardZh[skill.id]}
+        onRequestZh={requestCardZh}
       />
     );
   }
@@ -1327,6 +1433,13 @@ export default function App() {
               {traceProgress && (
                 <span className="trace-progress"><BadgeCheck size={14} /> 溯源中 {traceProgress.done}/{traceProgress.total}</span>
               )}
+              <button
+                className={translateCards ? "ghost-button active" : "ghost-button"}
+                onClick={() => setTranslateCards((v) => !v)}
+                title="翻译卡片描述（只读）"
+              >
+                <Languages size={15} /> {translateCards ? "原文" : "译"}
+              </button>
               <div className="segmented">
                 <button className={viewMode === "grid" ? "active" : ""} onClick={() => setViewMode("grid")} title="网格"><Grid2X2 size={16} /></button>
                 <button className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} title="列表"><List size={16} /></button>
@@ -1335,6 +1448,19 @@ export default function App() {
           )}
           {activeTab && (
             <div className="editor-actions">
+              <button
+                onClick={() => void toggleTranslation()}
+                className={activeTab.translation?.showing ? "active" : ""}
+                disabled={activeTab.translation?.status === "loading"}
+                title="机器翻译（只读，不改原文件）"
+              >
+                <Languages size={16} />{" "}
+                {activeTab.translation?.status === "loading"
+                  ? "翻译中…"
+                  : activeTab.translation?.showing
+                    ? "原文"
+                    : "译"}
+              </button>
               <button onClick={() => void saveNow()}><Save size={16} /> 保存</button>
               <button onClick={cloneSelected}><Copy size={16} /> 克隆</button>
               <button onClick={trashSelected} className="danger"><Trash2 size={16} /> 卸载</button>
@@ -1362,12 +1488,35 @@ export default function App() {
         ) : activeTab ? (
           <section className="editor-layout">
             <div className="editor-card">
-              <MarkdownEditor
-                key={`${activeTab.skill.id}-${activeTab.selectedFile}`}
-                value={activeTab.editorValue}
-                onChange={changeEditor}
-                theme={settings.theme}
-              />
+              {activeTab.translation?.showing &&
+              (activeTab.translation.status === "loading" || activeTab.translation.status === "done") ? (
+                <div className="translation-view">
+                  <div className="translation-banner">
+                    <Languages size={13} />{" "}
+                    {activeTab.translation.status === "loading"
+                      ? "翻译中…（流式）"
+                      : "机器翻译 · 只读 · 点「原文」切回"}
+                  </div>
+                  {activeTab.translation.status === "loading" ? (
+                    <StreamingText text={activeTab.translation.text} />
+                  ) : (
+                    <MarkdownEditor
+                      key={`${activeTab.skill.id}-${activeTab.selectedFile}-zh`}
+                      value={activeTab.translation.text}
+                      onChange={() => {}}
+                      theme={settings.theme}
+                      readOnly
+                    />
+                  )}
+                </div>
+              ) : (
+                <MarkdownEditor
+                  key={`${activeTab.skill.id}-${activeTab.selectedFile}`}
+                  value={activeTab.editorValue}
+                  onChange={changeEditor}
+                  theme={settings.theme}
+                />
+              )}
             </div>
             <aside className="inspector">
               <h2>文件树</h2>
@@ -2004,7 +2153,10 @@ function SkillCard({
   onToggleStar,
   onContextMenu,
   onMouseDown,
-  onRemoveFromFolder
+  onRemoveFromFolder,
+  translateOn,
+  descriptionZh,
+  onRequestZh
 }: {
   skill: Skill;
   agents: Agent[];
@@ -2016,8 +2168,14 @@ function SkillCard({
   onContextMenu: (event: React.MouseEvent, skill: Skill) => void;
   onMouseDown?: (e: React.MouseEvent) => void;
   onRemoveFromFolder?: () => void;
+  translateOn?: boolean;
+  descriptionZh?: string;
+  onRequestZh?: (skill: Skill) => void;
 }) {
   const canSync = agents.length > 1;
+  useEffect(() => {
+    if (translateOn && !descriptionZh && onRequestZh) onRequestZh(skill);
+  }, [translateOn, descriptionZh, skill, onRequestZh]);
   return (
     <article
       className="skill-card"
@@ -2044,7 +2202,7 @@ function SkillCard({
           <span className="skill-subtitle">{skill.displayName}</span>
         )}
       </div>
-      <p>{skill.description || "未提供描述"}</p>
+      <p>{translateOn && descriptionZh ? descriptionZh : (skill.description || "未提供描述")}</p>
       <AgentPresence agentIds={agentIds} agents={agents} />
       <div className="tag-row">
         {skill.tags.map((tag) => <span key={tag.id} style={{ borderColor: tag.color }}>{tag.name}</span>)}
@@ -2170,6 +2328,43 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
   const [addingAgent, setAddingAgent] = useState(false);
   const [addingAgentStep, setAddingAgentStep] = useState<"name" | "path">("name");
   const [addingAgentName, setAddingAgentName] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; latencyMs: number; message: string } | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const [detectError, setDetectError] = useState<string | null>(null);
+
+  function setTranslation(patch: Partial<TranslationConfig>) {
+    onChange({ ...settings, translation: { ...settings.translation, ...patch } });
+    setTestResult(null);
+  }
+
+  async function runTranslationTest() {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      setTestResult(await api.testTranslationConfig(settings.translation));
+    } catch (err) {
+      setTestResult({ ok: false, latencyMs: 0, message: errorMessage(err) });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  async function detectModels() {
+    setDetecting(true);
+    setDetectError(null);
+    try {
+      const list = await api.listTranslationModels(settings.translation);
+      setModels(list);
+      if (list.length === 0) setDetectError("接口没返回模型列表");
+    } catch (err) {
+      setModels([]);
+      setDetectError(errorMessage(err));
+    } finally {
+      setDetecting(false);
+    }
+  }
 
   function addTagWithName(name: string) {
     const colors = ["#7dd3fc", "#86efac", "#fcd34d", "#fca5a5", "#c4b5fd", "#fdba74", "#a5b4fc"];
@@ -2300,17 +2495,6 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
   return (
     <section className="settings-panel">
       <div className="setting-row">
-        <div className="setting-copy"><Languages size={18} /><strong>界面语言</strong><span>默认跟随系统，当前可手动切换。</span></div>
-        <CustomSelect
-          value={settings.language}
-          options={[
-            { value: "zh-CN", label: "中文" },
-            { value: "en-US", label: "English" }
-          ]}
-          onChange={(language) => onChange({ ...settings, language })}
-        />
-      </div>
-      <div className="setting-row">
         <div className="setting-copy"><SettingsIcon size={18} /><strong>主题</strong><span>编辑器配色将随主题调整。</span></div>
         <CustomSelect
           value={settings.theme}
@@ -2361,6 +2545,80 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
         <button className="ghost-button" onClick={onTraceScoped} disabled={traceProgress !== null}>
           <BadgeCheck size={15} /> {traceProgress ? `溯源中 ${traceProgress.done}/${traceProgress.total}` : "开始溯源"}
         </button>
+      </div>
+      <div className="translate-panel">
+        <header>
+          <Languages size={16} />
+          <div>
+            <strong>Skill 翻译</strong>
+            <span>自带接口（OpenAI 兼容或 Anthropic 原生），在预览页/总览页把英文 Skill 一键译成中文。译文只读，绝不改原文件。Key 仅本地保存。</span>
+          </div>
+        </header>
+        <div className="setting-row">
+          <CustomSelect
+            value={settings.translation.protocol}
+            options={[
+              { value: "openai", label: "OpenAI 兼容" },
+              { value: "anthropic", label: "Anthropic 原生" }
+            ]}
+            onChange={(protocol) => setTranslation({ protocol })}
+          />
+        </div>
+        <label className="field-row">
+          <span>接口 Base URL</span>
+          <input
+            type="text"
+            value={settings.translation.baseUrl}
+            placeholder={settings.translation.protocol === "anthropic" ? "https://api.anthropic.com" : "https://api.deepseek.com"}
+            onChange={(e) => setTranslation({ baseUrl: e.target.value })}
+          />
+        </label>
+        <label className="field-row">
+          <span>API Key</span>
+          <input type="password" value={settings.translation.apiKey} placeholder="sk-..." onChange={(e) => setTranslation({ apiKey: e.target.value })} />
+        </label>
+        <label className="field-row">
+          <span>模型</span>
+          <input
+            type="text"
+            list="translation-models"
+            value={settings.translation.model}
+            placeholder={settings.translation.protocol === "anthropic" ? "claude-haiku-4-5" : "deepseek-chat"}
+            onChange={(e) => setTranslation({ model: e.target.value })}
+          />
+          <datalist id="translation-models">
+            {models.map((m) => <option key={m} value={m} />)}
+          </datalist>
+        </label>
+        <div className="translate-test">
+          <button className="ghost-button" onClick={() => void detectModels()} disabled={detecting}>
+            {detecting ? "检测中…" : "检测模型"}
+          </button>
+          <button className="ghost-button" onClick={() => void runTranslationTest()} disabled={testing}>
+            {testing ? "测试中…" : "测试连接"}
+          </button>
+          {detectError && <span className="test-chip err" title={detectError}>✗ {detectError}</span>}
+          {!detectError && models.length > 0 && <span className="test-chip ok">✓ 检测到 {models.length} 个模型</span>}
+          {testResult && (
+            <span className={testResult.ok ? "test-chip ok" : "test-chip err"} title={testResult.message}>
+              {testResult.ok ? `✓ ${testResult.latencyMs}ms · ${testResult.message}` : `✗ ${testResult.message}`}
+            </span>
+          )}
+        </div>
+        {models.length > 0 && (
+          <div className="model-pills">
+            {models.map((m) => (
+              <button
+                key={m}
+                type="button"
+                className={settings.translation.model === m ? "model-pill active" : "model-pill"}
+                onClick={() => setTranslation({ model: m })}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="custom-agent-panel">
         <header>
@@ -2671,7 +2929,19 @@ function buildFileTree(files: Skill["files"]): FileTreeNode[] {
   return sortTree(root.children);
 }
 
-function MarkdownEditor({ value, onChange, theme }: { value: string; onChange: (value: string) => void; theme: string }) {
+function StreamingText({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [text]);
+  return (
+    <pre className="translation-stream" ref={ref}>
+      {text || "翻译中…"}
+    </pre>
+  );
+}
+
+function MarkdownEditor({ value, onChange, theme, readOnly = false }: { value: string; onChange: (value: string) => void; theme: string; readOnly?: boolean }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<Instance | null>(null);
   const lastValueRef = useRef(value);
@@ -2688,7 +2958,8 @@ function MarkdownEditor({ value, onChange, theme }: { value: string; onChange: (
         doc: value,
         interface: {
           appearance,
-          toolbar: true
+          toolbar: !readOnly,
+          readonly: readOnly
         },
         hooks: {
           afterUpdate: (doc) => {
@@ -2712,7 +2983,7 @@ function MarkdownEditor({ value, onChange, theme }: { value: string; onChange: (
         hostRef.current?.replaceChildren();
       }
     };
-  }, [appearance]);
+  }, [appearance, readOnly]);
 
   useEffect(() => {
     if (editorRef.current && value !== lastValueRef.current) {

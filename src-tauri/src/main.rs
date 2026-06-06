@@ -108,8 +108,6 @@ struct Snapshot {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Settings {
-    #[serde(default = "default_language")]
-    language: String,
     #[serde(default = "default_theme")]
     theme: String,
     #[serde(default = "default_shortcut")]
@@ -125,6 +123,36 @@ struct Settings {
     /// Agent id to scope automatic provenance tracing to; None/empty = all agents.
     #[serde(default, alias = "provenance_agent_id")]
     provenance_agent_id: Option<String>,
+    /// BYO translation endpoint (OpenAI-compatible or Anthropic-native).
+    #[serde(default)]
+    translation: TranslationConfig,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationConfig {
+    #[serde(default)]
+    protocol: String,
+    #[serde(default, alias = "base_url")]
+    base_url: String,
+    #[serde(default, alias = "api_key")]
+    api_key: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default, alias = "target_lang")]
+    target_lang: String,
+}
+
+impl Default for TranslationConfig {
+    fn default() -> Self {
+        Self {
+            protocol: "openai".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            target_lang: "zh-CN".into(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -270,7 +298,11 @@ fn main() {
             get_snapshots,
             restore_snapshot,
             get_settings,
-            update_settings
+            update_settings,
+            translate_markdown,
+            translate_stream,
+            test_translation_config,
+            list_translation_models
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SkillAnvil");
@@ -954,6 +986,443 @@ fn update_settings(
     Ok(settings)
 }
 
+// ─── Translation (BYO endpoint) ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranslationResult {
+    text: String,
+    cached: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestResult {
+    ok: bool,
+    latency_ms: u64,
+    message: String,
+}
+
+fn translation_system_prompt(target_lang: &str) -> String {
+    format!(
+        "You are a professional technical translator. Translate the user's Markdown document into {target_lang}. \
+Preserve all Markdown structure exactly: headings, lists, tables, blockquotes, and especially fenced code blocks and inline `code` — translate prose only, never translate code, commands, file paths, URLs, or YAML frontmatter keys. Keep identifier-like frontmatter values untouched. Do not add explanations and do not wrap the output in a code fence. Output only the translated document."
+    )
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    let t = s.trim();
+    if t.chars().count() <= max {
+        t.to_string()
+    } else {
+        let cut: String = t.chars().take(max).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Turn a non-2xx response body into a short, readable message instead of
+/// dumping a raw HTML error page or JSON blob into the UI.
+fn extract_api_error(status: reqwest::StatusCode, content_type: &str, body: &str) -> String {
+    let trimmed = body.trim();
+    // HTML/XML error page — gateways, WAFs, and rate-limit blockers return these.
+    if content_type.contains("text/html") || trimmed.starts_with('<') {
+        let title = trimmed
+            .split_once("<title>")
+            .and_then(|(_, rest)| rest.split_once("</title>"))
+            .map(|(t, _)| t.trim())
+            .filter(|t| !t.is_empty());
+        return match title {
+            Some(t) => format!("接口返回 {status}（HTML 错误页：{}）", truncate_str(t, 80)),
+            None => format!("接口返回 {status}（HTML 错误页，可能是网关限流或拦截）"),
+        };
+    }
+    // JSON error envelope (OpenAI / Anthropic style).
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(msg) = v["error"]["message"]
+            .as_str()
+            .or_else(|| v["message"].as_str())
+            .or_else(|| v["error"]["type"].as_str())
+            .or_else(|| v["error"].as_str())
+        {
+            return format!("接口返回 {status}：{}", truncate_str(msg, 200));
+        }
+    }
+    format!("接口返回 {status}：{}", truncate_str(trimmed, 200))
+}
+
+fn translation_cache_key(content: &str, model: &str, target_lang: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{digest}:{model}:{target_lang}")
+}
+
+/// Call the configured endpoint and return translated text. Branches on
+/// `protocol` — adding a provider means adding a match arm here.
+async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<String> {
+    let base = cfg.base_url.trim().trim_end_matches('/');
+    let target = if cfg.target_lang.trim().is_empty() {
+        "zh-CN"
+    } else {
+        cfg.target_lang.trim()
+    };
+    let system = translation_system_prompt(target);
+    let protocol = if cfg.protocol.trim().is_empty() {
+        "openai"
+    } else {
+        cfg.protocol.trim()
+    };
+    // A User-Agent is required by many API front-ends (Cloudflare/WAF return a
+    // 429/403 HTML block page for requests without one — reqwest sends none by
+    // default). Mirrors the provenance client.
+    let client = reqwest::Client::builder()
+        .user_agent("SkillAnvil/0.1")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    match protocol {
+        "anthropic" => {
+            let url = format!("{base}/v1/messages");
+            let body = serde_json::json!({
+                "model": cfg.model.trim(),
+                "max_tokens": 8192,
+                "system": system,
+                "messages": [{ "role": "user", "content": content }],
+            });
+            let res = client
+                .post(&url)
+                .header("x-api-key", cfg.api_key.trim())
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+            if !res.status().is_success() {
+                let code = res.status();
+                let ctype = res
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let detail = res.text().await.unwrap_or_default();
+                return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
+            }
+            let value: serde_json::Value = res.json().await?;
+            value["content"][0]["text"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| AppError::Message("响应解析失败：缺少 content[0].text".into()))
+        }
+        _ => {
+            let url = format!("{base}/chat/completions");
+            let body = serde_json::json!({
+                "model": cfg.model.trim(),
+                "temperature": 0,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": content },
+                ],
+            });
+            let res = client
+                .post(&url)
+                .header("authorization", format!("Bearer {}", cfg.api_key.trim()))
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+            if !res.status().is_success() {
+                let code = res.status();
+                let ctype = res
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let detail = res.text().await.unwrap_or_default();
+                return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
+            }
+            let value: serde_json::Value = res.json().await?;
+            value["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    AppError::Message("响应解析失败：缺少 choices[0].message.content".into())
+                })
+        }
+    }
+}
+
+/// Streaming variant: sends incremental deltas through a Tauri channel and
+/// returns the accumulated full text. SSE is parsed from a byte buffer split on
+/// newlines so multi-byte UTF-8 (e.g. Chinese) is never decoded mid-character.
+async fn translate_text_stream(
+    cfg: &TranslationConfig,
+    content: &str,
+    on_chunk: &tauri::ipc::Channel<String>,
+) -> AppResult<String> {
+    let base = cfg.base_url.trim().trim_end_matches('/');
+    let target = if cfg.target_lang.trim().is_empty() {
+        "zh-CN"
+    } else {
+        cfg.target_lang.trim()
+    };
+    let system = translation_system_prompt(target);
+    let is_anthropic = cfg.protocol.trim() == "anthropic";
+    let client = reqwest::Client::builder()
+        .user_agent("SkillAnvil/0.1")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let (url, body) = if is_anthropic {
+        (
+            format!("{base}/v1/messages"),
+            serde_json::json!({
+                "model": cfg.model.trim(),
+                "max_tokens": 8192,
+                "stream": true,
+                "system": system,
+                "messages": [{ "role": "user", "content": content }],
+            }),
+        )
+    } else {
+        (
+            format!("{base}/chat/completions"),
+            serde_json::json!({
+                "model": cfg.model.trim(),
+                "temperature": 0,
+                "stream": true,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": content },
+                ],
+            }),
+        )
+    };
+
+    let mut req = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream");
+    req = if is_anthropic {
+        req.header("x-api-key", cfg.api_key.trim())
+            .header("anthropic-version", "2023-06-01")
+    } else {
+        req.header("authorization", format!("Bearer {}", cfg.api_key.trim()))
+    };
+    let mut res = req.json(&body).send().await?;
+
+    if !res.status().is_success() {
+        let code = res.status();
+        let ctype = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let detail = res.text().await.unwrap_or_default();
+        return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut full = String::new();
+    while let Some(bytes) = res.chunk().await? {
+        buf.extend_from_slice(&bytes);
+        // Only decode complete lines — a complete SSE line never splits a char.
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
+            let line = line.trim();
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    let delta = if is_anthropic {
+                        v["delta"]["text"].as_str()
+                    } else {
+                        v["choices"][0]["delta"]["content"].as_str()
+                    };
+                    if let Some(d) = delta {
+                        if !d.is_empty() {
+                            full.push_str(d);
+                            let _ = on_chunk.send(d.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(full)
+}
+
+#[tauri::command]
+async fn translate_markdown(
+    state: State<'_, AppState>,
+    content: String,
+) -> AppResult<TranslationResult> {
+    let cfg = load_settings(&state.db_path)?.translation;
+    if cfg.base_url.trim().is_empty() || cfg.api_key.trim().is_empty() || cfg.model.trim().is_empty()
+    {
+        return Err(AppError::Message(
+            "翻译未配置：请在设置里填写接口、Key 和模型。".into(),
+        ));
+    }
+    let target = if cfg.target_lang.trim().is_empty() {
+        "zh-CN"
+    } else {
+        cfg.target_lang.trim()
+    };
+    let key = translation_cache_key(&content, cfg.model.trim(), target);
+
+    if let Ok(conn) = Connection::open(&state.db_path) {
+        if let Ok(text) = conn.query_row(
+            "select content from translations where cache_key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            return Ok(TranslationResult { text, cached: true });
+        }
+    }
+
+    let text = translate_text(&cfg, &content).await?;
+
+    if let Ok(conn) = Connection::open(&state.db_path) {
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        let _ = conn.execute(
+            "insert into translations(cache_key, content, created_at) values(?1, ?2, ?3)
+             on conflict(cache_key) do update set content = excluded.content, created_at = excluded.created_at",
+            params![key, text, now()],
+        );
+    }
+
+    Ok(TranslationResult { text, cached: false })
+}
+
+#[tauri::command]
+async fn translate_stream(
+    state: State<'_, AppState>,
+    content: String,
+    on_chunk: tauri::ipc::Channel<String>,
+) -> AppResult<TranslationResult> {
+    let cfg = load_settings(&state.db_path)?.translation;
+    if cfg.base_url.trim().is_empty() || cfg.api_key.trim().is_empty() || cfg.model.trim().is_empty()
+    {
+        return Err(AppError::Message(
+            "翻译未配置：请在设置里填写接口、Key 和模型。".into(),
+        ));
+    }
+    let target = if cfg.target_lang.trim().is_empty() {
+        "zh-CN"
+    } else {
+        cfg.target_lang.trim()
+    };
+    let key = translation_cache_key(&content, cfg.model.trim(), target);
+
+    // Cache hit → return the whole text; no need to stream.
+    if let Ok(conn) = Connection::open(&state.db_path) {
+        if let Ok(text) = conn.query_row(
+            "select content from translations where cache_key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        ) {
+            return Ok(TranslationResult { text, cached: true });
+        }
+    }
+
+    let text = translate_text_stream(&cfg, &content, &on_chunk).await?;
+
+    if let Ok(conn) = Connection::open(&state.db_path) {
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        let _ = conn.execute(
+            "insert into translations(cache_key, content, created_at) values(?1, ?2, ?3)
+             on conflict(cache_key) do update set content = excluded.content, created_at = excluded.created_at",
+            params![key, text, now()],
+        );
+    }
+
+    Ok(TranslationResult { text, cached: false })
+}
+
+#[tauri::command]
+async fn test_translation_config(config: TranslationConfig) -> AppResult<TestResult> {
+    if config.base_url.trim().is_empty()
+        || config.api_key.trim().is_empty()
+        || config.model.trim().is_empty()
+    {
+        return Ok(TestResult {
+            ok: false,
+            latency_ms: 0,
+            message: "接口、Key、模型都要填。".into(),
+        });
+    }
+    let start = std::time::Instant::now();
+    match translate_text(&config, "Hello, world.").await {
+        Ok(text) => Ok(TestResult {
+            ok: true,
+            latency_ms: start.elapsed().as_millis() as u64,
+            message: truncate_str(&text, 80),
+        }),
+        Err(err) => Ok(TestResult {
+            ok: false,
+            latency_ms: start.elapsed().as_millis() as u64,
+            message: err.to_string(),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn list_translation_models(config: TranslationConfig) -> AppResult<Vec<String>> {
+    if config.base_url.trim().is_empty() || config.api_key.trim().is_empty() {
+        return Err(AppError::Message("先填接口和 Key 再检测模型。".into()));
+    }
+    let base = config.base_url.trim().trim_end_matches('/');
+    let is_anthropic = config.protocol.trim() == "anthropic";
+    let client = reqwest::Client::builder()
+        .user_agent("SkillAnvil/0.1")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let url = if is_anthropic {
+        format!("{base}/v1/models")
+    } else {
+        format!("{base}/models")
+    };
+    let mut req = client.get(&url).header("accept", "application/json");
+    req = if is_anthropic {
+        req.header("x-api-key", config.api_key.trim())
+            .header("anthropic-version", "2023-06-01")
+    } else {
+        req.header("authorization", format!("Bearer {}", config.api_key.trim()))
+    };
+    let res = req.send().await?;
+    if !res.status().is_success() {
+        let code = res.status();
+        let ctype = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let detail = res.text().await.unwrap_or_default();
+        return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
+    }
+    let v: serde_json::Value = res.json().await?;
+    let mut models: Vec<String> = v["data"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
 fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
     let _guard = state
         .lock
@@ -1076,6 +1545,11 @@ fn init_db(path: &Path) -> AppResult<()> {
             manual integer not null default 0,
             traced_at text,
             error text
+        );
+        create table if not exists translations(
+            cache_key text primary key,
+            content text not null,
+            created_at text not null
         );
         "#,
     )?;
@@ -1411,7 +1885,6 @@ fn normalize_settings(mut settings: Settings) -> Settings {
 
 fn default_settings() -> Settings {
     Settings {
-        language: default_language(),
         theme: default_theme(),
         shortcut: default_shortcut(),
         minimize_to_tray: true,
@@ -1419,6 +1892,7 @@ fn default_settings() -> Settings {
         snapshots_enabled: true,
         custom_tags: default_custom_tags(),
         provenance_agent_id: None,
+        translation: TranslationConfig::default(),
     }
 }
 
@@ -1428,10 +1902,6 @@ fn default_custom_tags() -> Vec<Tag> {
         Tag { id: "coding".into(), name: "开发".into(), color: "#86efac".into() },
         Tag { id: "review".into(), name: "审查".into(), color: "#fcd34d".into() },
     ]
-}
-
-fn default_language() -> String {
-    "zh-CN".into()
 }
 
 fn default_theme() -> String {

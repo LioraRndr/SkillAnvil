@@ -1291,12 +1291,15 @@ button {
   justify-content: space-between;
   gap: 16px;
   padding: 14px;
+  flex-wrap: nowrap;
 }
 
 .setting-copy {
   display: grid;
-  grid-template-columns: 24px 1fr;
+  grid-template-columns: auto 1fr;
   gap: 5px 12px;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .setting-copy span {
@@ -1357,6 +1360,7 @@ button {
   border-radius: 6px;
   color: var(--text);
   background: color-mix(in srgb, var(--panel-solid) 86%, transparent);
+  white-space: nowrap;
   transition:
     border-color 160ms ease,
     background 160ms ease,
@@ -2639,4 +2643,155 @@ html.is-macos body {
   right: 0;
   height: 30px;
   z-index: 50;
+}
+
+/* ========================================================================= */
+/* Translation                                                               */
+/* ========================================================================= */
+.editor-actions button.active,
+.ghost-button.active {
+  border-color: transparent;
+  color: #f8f4ea;
+  background: var(--accent);
+}
+
+.translation-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.translation-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--panel-soft);
+}
+
+.translation-view .ink-mde {
+  height: calc(100vh - 205px);
+}
+
+.translation-stream {
+  margin: 0;
+  height: calc(100vh - 205px);
+  overflow: auto;
+  padding: 16px 18px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--panel-solid);
+}
+
+.translate-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.translate-panel > header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.translate-panel > header strong {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.translate-panel > header span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field-row > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field-row input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--panel-solid);
+}
+
+.field-row input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.translate-test {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.test-chip {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.test-chip.ok {
+  color: var(--good);
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+}
+
+.test-chip.err {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.model-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-pill {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-soft);
+  background: var(--panel-solid);
+  font-size: 12px;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.model-pill:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.model-pill.active {
+  border-color: transparent;
+  color: #f8f4ea;
+  background: var(--accent);
 }
