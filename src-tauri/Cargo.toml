@@ -21,13 +21,19 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 sha2 = "0.10"
-tauri = { version = "2.9.2", features = ["macos-private-api", "tray-icon"] }
+tauri = { version = "2.9.2", features = ["tray-icon"] }
 tokio = { version = "1", features = ["time"] }
 tauri-plugin-global-shortcut = "2.3.0"
 thiserror = "2.0"
 trash = "5.2"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 walkdir = "2.5"
+
+# `macos-private-api` is only valid on macOS, where `macOSPrivateApi: true` in
+# tauri.macos.conf.json matches it. Enabling it on other platforms fails the
+# tauri-build config/feature allowlist check, so scope it to macOS targets.
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2.9.2", features = ["macos-private-api"] }
 
 [profile.release]
 panic = "abort"
