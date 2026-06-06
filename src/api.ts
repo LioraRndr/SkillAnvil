@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   Agent,
@@ -11,7 +11,8 @@ import type {
   Snapshot,
   SyncTargetStatus,
   Tag,
-  Theme
+  Theme,
+  TranslationConfig
 } from "./types";
 
 const isTauriRuntime = "__TAURI_INTERNALS__" in window;
@@ -53,5 +54,16 @@ export const api = {
   setWindowTheme: async (theme: Theme) => {
     if (!isTauriRuntime) return;
     await getCurrentWindow().setTheme(theme === "system" ? null : theme);
-  }
+  },
+  translateMarkdown: (content: string) =>
+    call<{ text: string; cached: boolean }>("translate_markdown", { content }),
+  translateStream: (content: string, onChunk: (delta: string) => void) => {
+    const channel = new Channel<string>();
+    channel.onmessage = onChunk;
+    return call<{ text: string; cached: boolean }>("translate_stream", { content, onChunk: channel });
+  },
+  testTranslationConfig: (config: TranslationConfig) =>
+    call<{ ok: boolean; latencyMs: number; message: string }>("test_translation_config", { config }),
+  listTranslationModels: (config: TranslationConfig) =>
+    call<string[]>("list_translation_models", { config })
 };

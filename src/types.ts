@@ -1,5 +1,14 @@
 export type Theme = "dark" | "light" | "system";
 export type SkillSource = "local" | "github";
+export type TranslationProtocol = "openai" | "anthropic";
+
+export interface TranslationConfig {
+  protocol: TranslationProtocol;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  targetLang: string;
+}
 
 export interface Agent {
   id: string;
@@ -57,6 +66,7 @@ export interface Settings {
   customAgents: AgentPathConfig[];
   snapshotsEnabled: boolean;
   provenanceAgentId?: string | null;
+  translation: TranslationConfig;
 }
 
 export interface SkillCategory {
