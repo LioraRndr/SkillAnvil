@@ -3,7 +3,6 @@ import type { CSSProperties } from "react";
 import { ink } from "ink-mde";
 import type { Instance } from "ink-mde";
 import {
-  Archive,
   AlertTriangle,
   BadgeCheck,
   Check,
@@ -37,6 +36,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import skillanvilLogo from "./assets/skillanvil-logo.png";
 import gooseSvg from "./assets/goose.svg";
 import hermesagentSvg from "./assets/hermesagent.svg";
 import junieColorSvg from "./assets/junie-color.svg";
@@ -1179,9 +1179,7 @@ export default function App() {
       <aside className="sidebar">
         {isMacChrome && <div className="titlebar-drag" data-tauri-drag-region />}
         <div className="brand">
-          <div className="brand-mark">
-            <Archive size={22} />
-          </div>
+          <img className="brand-logo" src={skillanvilLogo} alt="SkillAnvil logo" />
           <div>
             <strong>SkillAnvil</strong>
           </div>

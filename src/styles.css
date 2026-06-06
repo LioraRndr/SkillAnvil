@@ -10,6 +10,14 @@
   src: url("./assets/fonts/InstrumentSerif-Regular.woff2") format("woff2");
 }
 
+@font-face {
+  font-family: "Nixie One";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/NixieOne-Regular.woff2") format("woff2");
+}
+
 :root {
   color: #d9d6ca;
   background: #22231f;
@@ -156,22 +164,19 @@ button {
   padding: 0 5px 4px;
 }
 
-.brand-mark {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border: 1px solid var(--line);
+.brand-logo {
+  width: 32px;
+  height: 32px;
   border-radius: 7px;
-  color: #f8f4ea;
-  background: var(--accent);
-  box-shadow: none;
+  object-fit: contain;
+  flex: none;
 }
 
 .brand strong {
-  font-size: 14px;
-  font-weight: 750;
-  letter-spacing: 0;
+  font-family: "Nixie One", "Instrument Serif", ui-serif, Georgia, serif;
+  font-size: 18px;
+  font-weight: 400;
+  letter-spacing: 0.4px;
 }
 
 .search-box {
