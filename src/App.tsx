@@ -53,8 +53,10 @@ import claudeColorSvg from "./assets/claude-color.svg";
 import clineSvg from "./assets/cline.svg";
 import codebuddyColorSvg from "./assets/codebuddy-color.svg";
 import codexColorSvg from "./assets/codex-color.svg";
+import kiroColorPng from "./assets/kiro-color.png";
 
 const agentIconMap: Record<string, string> = {
+  kiro: kiroColorPng,
   goose: gooseSvg,
   hermes: hermesagentSvg,
   junie: junieColorSvg,
