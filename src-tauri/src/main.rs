@@ -270,11 +270,32 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            let state = init_state()?;
-            init_db(&state.db_path)?;
+            // State + DB are core: if these fail the app genuinely cannot run.
+            // Because the release profile uses `panic = "abort"`, a bare `?`
+            // here would kill the process before any window paints — the app
+            // would just "open then instantly close" with no trace. Persist a
+            // crash log to the temp dir first so the failure is diagnosable.
+            let state = match init_state().and_then(|state| {
+                init_db(&state.db_path)?;
+                Ok(state)
+            }) {
+                Ok(state) => state,
+                Err(err) => {
+                    log_startup_failure(&err);
+                    return Err(Box::new(err));
+                }
+            };
             app.manage(state);
-            setup_tray(app.handle())?;
-            setup_shortcut(app.handle())?;
+            // Tray and global shortcut are auxiliary. On Windows in particular,
+            // RegisterHotKey fails hard when the combo is already claimed by
+            // another app — that must never abort startup and leave the user
+            // with an app that "opens then instantly closes". Degrade instead.
+            if let Err(err) = setup_tray(app.handle()) {
+                eprintln!("[skillanvil] tray setup failed, continuing without it: {err}");
+            }
+            if let Err(err) = setup_shortcut(app.handle()) {
+                eprintln!("[skillanvil] global shortcut registration failed, continuing without it: {err}");
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -320,6 +341,22 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run SkillAnvil");
+}
+
+/// Best-effort crash log for fatal startup errors. The release build aborts on
+/// panic, so without this a failed `setup` leaves no trace on the user's
+/// machine. Written to the temp dir, which is resolvable even when the app's
+/// own data dir could not be created.
+fn log_startup_failure(err: &AppError) {
+    let path = std::env::temp_dir().join("skillanvil-startup-error.log");
+    if let Ok(mut file) = fs::File::create(&path) {
+        let _ = writeln!(
+            file,
+            "SkillAnvil {} failed to start: {err}",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+    eprintln!("[skillanvil] fatal startup error: {err}");
 }
 
 fn init_state() -> AppResult<AppState> {
