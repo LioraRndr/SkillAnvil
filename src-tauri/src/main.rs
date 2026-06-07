@@ -2162,6 +2162,7 @@ fn default_agent_configs() -> Vec<AgentPathConfig> {
             "claude",
         ),
         builtin_agent("codex", "Codex", &["~/.codex/skills"], true, "codex"),
+        builtin_agent("kiro", "Kiro", &["~/.kiro/skills"], true, "kiro"),
         builtin_agent(
             "antigravity",
             "Antigravity",
