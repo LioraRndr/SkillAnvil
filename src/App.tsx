@@ -2401,6 +2401,7 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
   const [addingAgent, setAddingAgent] = useState(false);
   const [addingAgentStep, setAddingAgentStep] = useState<"name" | "path">("name");
   const [addingAgentName, setAddingAgentName] = useState("");
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; latencyMs: number; message: string } | null>(null);
   const [detecting, setDetecting] = useState(false);
@@ -2663,7 +2664,20 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
         </label>
         <label className="field-row">
           <span>API Key</span>
-          <input type="password" value={settings.translation.apiKey} placeholder="sk-..." onChange={(e) => setTranslation({ apiKey: e.target.value })} />
+          <input
+            type="password"
+            value={apiKeyDraft}
+            autoComplete="new-password"
+            placeholder={settings.translation.apiKey ? "已安全保存；输入新 Key 可替换" : "sk-..."}
+            onChange={(e) => setApiKeyDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && apiKeyDraft.trim()) {
+                e.preventDefault();
+                setTranslation({ apiKey: apiKeyDraft.trim() });
+                setApiKeyDraft("");
+              }
+            }}
+          />
         </label>
         <label className="field-row">
           <span>模型</span>
@@ -2679,6 +2693,26 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
           </datalist>
         </label>
         <div className="translate-test">
+          <button
+            className="ghost-button"
+            onClick={() => {
+              setTranslation({ apiKey: apiKeyDraft.trim() });
+              setApiKeyDraft("");
+            }}
+            disabled={!apiKeyDraft.trim()}
+          >
+            保存 API Key
+          </button>
+          <button
+            className="ghost-button"
+            onClick={() => {
+              setApiKeyDraft("");
+              setTranslation({ apiKey: "" });
+            }}
+            disabled={!settings.translation.apiKey}
+          >
+            清除 API Key
+          </button>
           <button className="ghost-button" onClick={() => void detectModels()} disabled={detecting}>
             {detecting ? "检测中…" : "检测模型"}
           </button>

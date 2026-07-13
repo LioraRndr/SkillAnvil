@@ -11,5 +11,8 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"]
     }
   },
-  envPrefix: ["VITE_", "TAURI_"]
+  // Never expose the broad TAURI_* namespace to browser code: it includes
+  // release-signing secrets such as TAURI_SIGNING_PRIVATE_KEY. Tauri's public
+  // frontend build metadata uses the narrower TAURI_ENV_* namespace.
+  envPrefix: ["VITE_", "TAURI_ENV_"]
 });

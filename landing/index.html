@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="SkillAnvil 是一款本地优先的 Coding Agent Skill 桌面工作台，用于扫描、编辑、同步、快照和溯源本地 Skills。"
+    />
+    <title>SkillAnvil | Coding Agent Skill 工作台</title>
+    <link rel="icon" href="./assets/skillanvil-logo.png" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand-mark" href="#top" aria-label="SkillAnvil 首页">
+        <img src="./assets/skillanvil-logo.png" alt="" />
+        <span>SkillAnvil</span>
+      </a>
+      <nav class="site-nav" aria-label="页面导航">
+        <a href="#workflow">工作流</a>
+        <a href="#features">能力</a>
+        <a href="#download">下载</a>
+      </nav>
+      <a class="header-action" href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noreferrer">
+        GitHub
+      </a>
+    </header>
+
+    <main id="top">
+      <section class="hero section-shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Local-first Skill Workbench</p>
+          <h1 id="hero-title">SkillAnvil</h1>
+          <p class="hero-lede">
+            管理多种本地 Coding Agent 的 Skill 目录。浏览、编辑、打标签、同步和追溯来源，
+            都在桌面端完成。
+          </p>
+          <div class="hero-actions" aria-label="主要操作">
+            <a class="primary-action" href="#download">下载应用</a>
+            <a class="secondary-action" href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noreferrer">
+              查看源码
+            </a>
+          </div>
+          <dl class="hero-facts" aria-label="产品摘要">
+            <div>
+              <dt>编码</dt>
+              <dd>UTF-8 / BOM / GBK</dd>
+            </div>
+            <div>
+              <dt>运行</dt>
+              <dd>Tauri 2 Desktop</dd>
+            </div>
+            <div>
+              <dt>网络</dt>
+              <dd>本地优先</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="product-preview" aria-label="SkillAnvil 工作台界面预览">
+          <div class="preview-topbar">
+            <span></span>
+            <span></span>
+            <span></span>
+            <strong>Skill 总览</strong>
+          </div>
+          <div class="preview-grid">
+            <aside class="preview-sidebar">
+              <div class="preview-brand">
+                <img src="./assets/skillanvil-logo.png" alt="" />
+                <span>SkillAnvil</span>
+              </div>
+              <div class="preview-search">搜索</div>
+              <p>Agents</p>
+              <button class="active">Codex <b>24</b></button>
+              <button>Claude Code <b>18</b></button>
+              <button>Antigravity <b>11</b></button>
+              <p>标签</p>
+              <button><i class="tag tag-blue"></i>写作</button>
+              <button><i class="tag tag-green"></i>开发</button>
+              <button><i class="tag tag-amber"></i>审查</button>
+            </aside>
+            <section class="preview-main">
+              <div class="preview-main-head">
+                <div>
+                  <h2>Skill 总览</h2>
+                  <span>扫描、编辑和同步本地 Coding Agent Skills</span>
+                </div>
+                <div class="preview-stats">
+                  <span>3 Agents</span>
+                  <span>53 Skills</span>
+                </div>
+              </div>
+              <div class="skill-cards">
+                <article>
+                  <header>
+                    <b>frontend-design</b>
+                    <span>已验证</span>
+                  </header>
+                  <p>创建符合产品调性的前端界面，保持设计一致性。</p>
+                  <footer>
+                    <small>v0.1.0</small>
+                    <button>编辑</button>
+                  </footer>
+                </article>
+                <article>
+                  <header>
+                    <b>openai-docs</b>
+                    <span>疑似</span>
+                  </header>
+                  <p>读取官方文档并把接口约束落到代码实现里。</p>
+                  <footer>
+                    <small>v0.2.3</small>
+                    <button>同步</button>
+                  </footer>
+                </article>
+                <article class="editor-card">
+                  <header>
+                    <b>SKILL.md</b>
+                    <span>UTF-8</span>
+                  </header>
+                  <pre># Skill
+Use this skill when...
+
+## Workflow
+1. Inspect
+2. Edit
+3. Verify</pre>
+                </article>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section class="signal-strip" aria-label="核心能力">
+        <div class="section-shell strip-grid">
+          <span>统一扫描多 Agent Skill 目录</span>
+          <span>编码感知 Markdown 编辑</span>
+          <span>快照、同步、溯源一体化</span>
+        </div>
+      </section>
+
+      <section id="workflow" class="section-shell workflow-section" aria-labelledby="workflow-title">
+        <div class="section-intro">
+          <p class="eyebrow">Workflow</p>
+          <h2 id="workflow-title">从散落目录到可维护资产</h2>
+          <p>
+            SkillAnvil 面向已经在多种 Coding Agent 之间切换的人。它不替你发明新的规范，
+            而是把现有目录读进来，让同步、版本和来源变得可见。
+          </p>
+        </div>
+        <div class="workflow-steps">
+          <article>
+            <span>01</span>
+            <h3>扫描</h3>
+            <p>识别本地 Agent 的 Skill 文件夹，自动聚合同名 Skill 和同源合集。</p>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>整理</h3>
+            <p>用收藏、标签和子分类维护你的工作方式，不改变原始目录结构。</p>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>编辑</h3>
+            <p>打开 SKILL.md 或相关文件，保留原编码写回，并在保存时生成快照。</p>
+          </article>
+          <article>
+            <span>04</span>
+            <h3>同步</h3>
+            <p>对比目标 Agent 的内容状态，只把需要更新的 Skill 同步过去。</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="features" class="section-shell feature-section" aria-labelledby="features-title">
+        <div class="section-intro compact">
+          <p class="eyebrow">Capabilities</p>
+          <h2 id="features-title">为 Skill 维护做的具体功能</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>统一管理</h3>
+            <p>在一个窗口里查看多个 Agent 的 Skill，避免在不同隐藏目录之间来回翻找。</p>
+          </article>
+          <article>
+            <h3>编码感知</h3>
+            <p>读取并写回 UTF-8、UTF-8 BOM、GBK 文件，降低中文 Skill 被转码破坏的风险。</p>
+          </article>
+          <article>
+            <h3>跨 Agent 同步</h3>
+            <p>用内容哈希判断相同、不同或缺失，只显示真正需要处理的目标。</p>
+          </article>
+          <article>
+            <h3>快照历史</h3>
+            <p>保存时记录版本，后续可以查看差异或一键回滚到旧快照。</p>
+          </article>
+          <article>
+            <h3>来源溯源</h3>
+            <p>对照公共 Skill 注册表和上游 SKILL.md，标记已验证、疑似、本地或歧义来源。</p>
+          </article>
+          <article>
+            <h3>自带翻译接口</h3>
+            <p>使用你自己的 OpenAI 兼容或 Anthropic 原生接口，只在触发翻译时发送内容。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="privacy-band" aria-labelledby="privacy-title">
+        <div class="section-shell privacy-layout">
+          <div>
+            <p class="eyebrow">Privacy</p>
+            <h2 id="privacy-title">本地优先，不把你的 Skill 内容默认上传</h2>
+          </div>
+          <p>
+            应用只在检查更新、用户主动溯源或用户主动翻译时联网。溯源发送的是 Skill 名称，
+            翻译使用你配置的接口和密钥。设置保存在本机应用数据目录。
+          </p>
+        </div>
+      </section>
+
+      <section id="download" class="section-shell download-section" aria-labelledby="download-title">
+        <div class="section-intro compact">
+          <p class="eyebrow">Download</p>
+          <h2 id="download-title">下载桌面安装包</h2>
+          <p>从 GitHub Releases 获取 macOS、Windows 和 Linux 安装包。</p>
+        </div>
+        <div class="download-grid">
+          <article>
+            <h3>macOS</h3>
+            <p>Universal DMG，适用于 Apple Silicon 和 Intel。</p>
+          </article>
+          <article>
+            <h3>Windows</h3>
+            <p>x64 Setup 或 MSI 安装包。</p>
+          </article>
+          <article>
+            <h3>Linux</h3>
+            <p>AppImage、deb 或 rpm。</p>
+          </article>
+        </div>
+        <a class="primary-action download-link" href="https://github.com/LioraRndr/SkillAnvil/releases" target="_blank" rel="noreferrer">
+          打开 Releases
+        </a>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>SkillAnvil</span>
+      <a href="https://github.com/LioraRndr/SkillAnvil/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a>
+    </footer>
+  </body>
+</html>

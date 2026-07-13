@@ -1,0 +1,9 @@
+{
+  "name": "skillanvil-landing",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build-worker.mjs",
+    "test": "node --test build-support.test.mjs"
+  }
+}

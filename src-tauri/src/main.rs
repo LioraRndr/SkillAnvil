@@ -10,9 +10,11 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    net::IpAddr,
+    path::{Component, Path, PathBuf},
     process::Command,
     sync::Mutex,
+    time::Duration,
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -47,6 +49,11 @@ impl serde::Serialize for AppError {
 }
 
 type AppResult<T> = Result<T, AppError>;
+
+const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_UPSTREAM_SKILL_BYTES: usize = 2 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
+const MASKED_API_KEY: &str = "••••••••";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -546,6 +553,7 @@ fn clone_skill(state: State<AppState>, skill_id: String, new_name: String) -> Ap
 fn get_sync_targets(state: State<AppState>, skill_id: String) -> AppResult<Vec<SyncTargetStatus>> {
     let conn = Connection::open(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
+    validate_name(&skill.name)?;
     let source_hash = hash_dir(Path::new(&skill.dir_path))?;
     let mut result = Vec::new();
     for agent in load_agents(&conn)? {
@@ -579,6 +587,7 @@ fn sync_skill(
 ) -> AppResult<Vec<Skill>> {
     let conn = Connection::open(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
+    validate_name(&skill.name)?;
     for agent_id in target_agent_ids {
         let agent = find_agent(&conn, &agent_id)?;
         let root = agent
@@ -586,11 +595,13 @@ fn sync_skill(
             .first()
             .ok_or_else(|| AppError::Message("目标 Agent 没有可写路径。".into()))?;
         fs::create_dir_all(root)?;
-        let target = Path::new(root).join(&skill.name);
+        let source = Path::new(&skill.dir_path);
+        let target = secure_join(root, &skill.name)?;
+        ensure_disjoint_paths(source, &target)?;
         if target.exists() {
             trash::delete(&target).map_err(|err| AppError::Message(err.to_string()))?;
         }
-        copy_dir_all(Path::new(&skill.dir_path), &target)?;
+        copy_dir_all(source, &target)?;
         conn.execute(
             "insert into sync_logs(id, skill_id, target_agent_id, created_at) values(?1, ?2, ?3, ?4)",
             params![Uuid::new_v4().to_string(), skill_id, agent.id, now()],
@@ -624,10 +635,13 @@ fn open_in_file_manager(path: String) -> AppResult<()> {
 
 #[tauri::command]
 fn open_url(url: String) -> AppResult<()> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(AppError::Message("仅支持打开 http(s) 链接。".into()));
+    let parsed = validate_outbound_url(&url, false)?;
+    if !parsed.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com")
+    }) {
+        return Err(AppError::Message("仅允许打开受信任的 GitHub 链接。".into()));
     }
-    open_external_url(&url)
+    open_external_url(parsed.as_str())
 }
 
 #[tauri::command]
@@ -689,7 +703,7 @@ async fn trace_skill_provenance(
             .collect()
     };
 
-    let client = reqwest::Client::new();
+    let client = build_http_client("SkillAnvil", true)?;
     let mut results = Vec::with_capacity(targets.len());
     let last = targets.len().saturating_sub(1);
     for (index, (id, name, local_md)) in targets.into_iter().enumerate() {
@@ -854,7 +868,8 @@ async fn search_registry(
             res.status()
         )));
     }
-    let value: serde_json::Value = res.json().await?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&read_response_limited(res, MAX_JSON_RESPONSE_BYTES).await?)?;
     let mut out = Vec::new();
     if let Some(arr) = value["skills"].as_array() {
         for item in arr {
@@ -901,8 +916,10 @@ async fn fetch_upstream_skill_md(
             .await
         {
             if res.status().is_success() {
-                if let Ok(text) = res.text().await {
-                    return Some(text);
+                if let Ok(bytes) = read_response_limited(res, MAX_UPSTREAM_SKILL_BYTES).await {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        return Some(text);
+                    }
                 }
             }
         }
@@ -1037,15 +1054,17 @@ fn restore_snapshot(state: State<AppState>, snapshot_id: String) -> AppResult<Re
 
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> AppResult<Settings> {
-    load_settings(&state.db_path)
+    load_settings(&state.db_path).map(redact_settings)
 }
 
 #[tauri::command]
 fn update_settings(
     app: AppHandle,
     state: State<AppState>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> AppResult<Settings> {
+    let current = load_settings(&state.db_path)?;
+    reconcile_masked_api_key(&current.translation, &mut settings.translation);
     register_shortcut(&app, &settings.shortcut)?;
     let conn = Connection::open(&state.db_path)?;
     conn.execute(
@@ -1053,7 +1072,43 @@ fn update_settings(
          on conflict(key) do update set value = excluded.value",
         params![serde_json::to_string(&settings)?],
     )?;
-    Ok(settings)
+    Ok(redact_settings(settings))
+}
+
+fn redact_settings(mut settings: Settings) -> Settings {
+    if !settings.translation.api_key.is_empty() {
+        settings.translation.api_key = MASKED_API_KEY.into();
+    }
+    settings
+}
+
+fn same_translation_endpoint(a: &TranslationConfig, b: &TranslationConfig) -> bool {
+    a.protocol.trim().eq_ignore_ascii_case(b.protocol.trim())
+        && a.base_url.trim().trim_end_matches('/') == b.base_url.trim().trim_end_matches('/')
+}
+
+fn reconcile_masked_api_key(current: &TranslationConfig, incoming: &mut TranslationConfig) {
+    if incoming.api_key == MASKED_API_KEY {
+        incoming.api_key = if same_translation_endpoint(current, incoming) {
+            current.api_key.clone()
+        } else {
+            String::new()
+        };
+    }
+}
+
+fn resolve_translation_config(
+    db_path: &Path,
+    mut config: TranslationConfig,
+) -> AppResult<TranslationConfig> {
+    if config.api_key == MASKED_API_KEY {
+        let current = load_settings(db_path)?.translation;
+        if !same_translation_endpoint(&current, &config) {
+            return Err(AppError::Message("接口已变化，请重新输入 API Key。".into()));
+        }
+        config.api_key = current.api_key;
+    }
+    Ok(config)
 }
 
 // ─── Translation (BYO endpoint) ─────────────────────────────────────────────
@@ -1127,10 +1182,94 @@ fn translation_cache_key(content: &str, model: &str, target_lang: &str) -> Strin
     format!("{digest}:{model}:{target_lang}")
 }
 
+fn validate_outbound_url(raw: &str, allow_http_loopback: bool) -> AppResult<reqwest::Url> {
+    let url = reqwest::Url::parse(raw.trim())
+        .map_err(|_| AppError::Message("接口地址不是有效 URL。".into()))?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AppError::Message(
+            "接口地址不能包含账号、密码、查询参数或片段。".into(),
+        ));
+    }
+
+    let is_loopback = url.host_str().is_some_and(|host| {
+        let host = host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .unwrap_or(host);
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" if allow_http_loopback && is_loopback => Ok(url),
+        "http" => Err(AppError::Message(
+            "为防止密钥被窃听，远程接口必须使用 HTTPS；本机 localhost 可使用 HTTP。".into(),
+        )),
+        _ => Err(AppError::Message("仅支持 http(s) 地址。".into())),
+    }
+}
+
+fn build_http_client(user_agent: &str, allow_redirects: bool) -> AppResult<reqwest::Client> {
+    let redirect = if allow_redirects {
+        reqwest::redirect::Policy::limited(5)
+    } else {
+        reqwest::redirect::Policy::none()
+    };
+    Ok(reqwest::Client::builder()
+        .user_agent(user_agent)
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(45))
+        .timeout(Duration::from_secs(180))
+        .redirect(redirect)
+        .build()?)
+}
+
+async fn read_response_limited(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> AppResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(AppError::Message(format!(
+            "接口响应超过安全上限（{} MiB）。",
+            max_bytes / (1024 * 1024)
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(AppError::Message(format!(
+                "接口响应超过安全上限（{} MiB）。",
+                max_bytes / (1024 * 1024)
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_response_text_limited(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> AppResult<String> {
+    let body = read_response_limited(response, max_bytes).await?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 /// Call the configured endpoint and return translated text. Branches on
 /// `protocol` — adding a provider means adding a match arm here.
 async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<String> {
     let base = cfg.base_url.trim().trim_end_matches('/');
+    validate_outbound_url(base, true)?;
     let target = if cfg.target_lang.trim().is_empty() {
         "zh-CN"
     } else {
@@ -1145,10 +1284,9 @@ async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<Str
     // A User-Agent is required by many API front-ends (Cloudflare/WAF return a
     // 429/403 HTML block page for requests without one — reqwest sends none by
     // default). Mirrors the provenance client.
-    let client = reqwest::Client::builder()
-        .user_agent("SkillAnvil/0.1")
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    // Authentication-bearing requests never follow redirects: a misconfigured
+    // or malicious endpoint must not be able to bounce credentials elsewhere.
+    let client = build_http_client("SkillAnvil/0.1", false)?;
 
     match protocol {
         "anthropic" => {
@@ -1176,10 +1314,14 @@ async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<Str
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let detail = res.text().await.unwrap_or_default();
+                let detail = read_response_text_limited(res, MAX_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_default();
                 return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
             }
-            let value: serde_json::Value = res.json().await?;
+            let value: serde_json::Value = serde_json::from_slice(
+                &read_response_limited(res, MAX_JSON_RESPONSE_BYTES).await?,
+            )?;
             value["content"][0]["text"]
                 .as_str()
                 .map(|s| s.to_string())
@@ -1211,10 +1353,14 @@ async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<Str
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let detail = res.text().await.unwrap_or_default();
+                let detail = read_response_text_limited(res, MAX_ERROR_RESPONSE_BYTES)
+                    .await
+                    .unwrap_or_default();
                 return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
             }
-            let value: serde_json::Value = res.json().await?;
+            let value: serde_json::Value = serde_json::from_slice(
+                &read_response_limited(res, MAX_JSON_RESPONSE_BYTES).await?,
+            )?;
             value["choices"][0]["message"]["content"]
                 .as_str()
                 .map(|s| s.to_string())
@@ -1234,6 +1380,7 @@ async fn translate_text_stream(
     on_chunk: &tauri::ipc::Channel<String>,
 ) -> AppResult<String> {
     let base = cfg.base_url.trim().trim_end_matches('/');
+    validate_outbound_url(base, true)?;
     let target = if cfg.target_lang.trim().is_empty() {
         "zh-CN"
     } else {
@@ -1241,10 +1388,7 @@ async fn translate_text_stream(
     };
     let system = translation_system_prompt(target);
     let is_anthropic = cfg.protocol.trim() == "anthropic";
-    let client = reqwest::Client::builder()
-        .user_agent("SkillAnvil/0.1")
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = build_http_client("SkillAnvil/0.1", false)?;
 
     let (url, body) = if is_anthropic {
         (
@@ -1292,13 +1436,22 @@ async fn translate_text_stream(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let detail = res.text().await.unwrap_or_default();
+        let detail = read_response_text_limited(res, MAX_ERROR_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
     }
 
     let mut buf: Vec<u8> = Vec::new();
     let mut full = String::new();
+    let mut received_bytes = 0usize;
     while let Some(bytes) = res.chunk().await? {
+        received_bytes = received_bytes.saturating_add(bytes.len());
+        if received_bytes > MAX_JSON_RESPONSE_BYTES {
+            return Err(AppError::Message(
+                "流式翻译响应超过安全上限（8 MiB）。".into(),
+            ));
+        }
         buf.extend_from_slice(&bytes);
         // Only decode complete lines — a complete SSE line never splits a char.
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
@@ -1428,7 +1581,14 @@ async fn translate_stream(
 }
 
 #[tauri::command]
-async fn test_translation_config(config: TranslationConfig) -> AppResult<TestResult> {
+async fn test_translation_config(
+    state: State<'_, AppState>,
+    config: TranslationConfig,
+) -> AppResult<TestResult> {
+    // The frontend only receives a masked secret. Resolve it exclusively for
+    // the already-configured endpoint so a compromised WebView cannot redirect
+    // the stored key to an attacker-controlled server.
+    let config = resolve_translation_config(&state.db_path, config)?;
     if config.base_url.trim().is_empty()
         || config.api_key.trim().is_empty()
         || config.model.trim().is_empty()
@@ -1455,16 +1615,18 @@ async fn test_translation_config(config: TranslationConfig) -> AppResult<TestRes
 }
 
 #[tauri::command]
-async fn list_translation_models(config: TranslationConfig) -> AppResult<Vec<String>> {
+async fn list_translation_models(
+    state: State<'_, AppState>,
+    config: TranslationConfig,
+) -> AppResult<Vec<String>> {
+    let config = resolve_translation_config(&state.db_path, config)?;
     if config.base_url.trim().is_empty() || config.api_key.trim().is_empty() {
         return Err(AppError::Message("先填接口和 Key 再检测模型。".into()));
     }
     let base = config.base_url.trim().trim_end_matches('/');
+    validate_outbound_url(base, true)?;
     let is_anthropic = config.protocol.trim() == "anthropic";
-    let client = reqwest::Client::builder()
-        .user_agent("SkillAnvil/0.1")
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = build_http_client("SkillAnvil/0.1", false)?;
     let url = if is_anthropic {
         format!("{base}/v1/models")
     } else {
@@ -1486,10 +1648,13 @@ async fn list_translation_models(config: TranslationConfig) -> AppResult<Vec<Str
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
-        let detail = res.text().await.unwrap_or_default();
+        let detail = read_response_text_limited(res, MAX_ERROR_RESPONSE_BYTES)
+            .await
+            .unwrap_or_default();
         return Err(AppError::Message(extract_api_error(code, &ctype, &detail)));
     }
-    let v: serde_json::Value = res.json().await?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&read_response_limited(res, MAX_JSON_RESPONSE_BYTES).await?)?;
     let mut models: Vec<String> = v["data"]
         .as_array()
         .map(|arr| {
@@ -1559,9 +1724,7 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
 async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
-    let client = reqwest::Client::builder()
-        .user_agent("SkillAnvil")
-        .build()?;
+    let client = build_http_client("SkillAnvil", true)?;
 
     let response = client
         .get("https://api.github.com/repos/LioraRndr/SkillAnvil/releases/latest")
@@ -1584,7 +1747,8 @@ async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> 
         return Ok(empty());
     }
 
-    let json: serde_json::Value = response.json().await?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&read_response_limited(response, MAX_JSON_RESPONSE_BYTES).await?)?;
     let tag = json["tag_name"].as_str().unwrap_or("").to_string();
     let latest_version = tag.strip_prefix('v').unwrap_or(&tag).to_string();
     let release_url = json["html_url"].as_str().unwrap_or("").to_string();
@@ -1832,6 +1996,12 @@ fn scan_one_skill(agent: &Agent, dir: &Path) -> AppResult<Skill> {
         .and_then(|value| value.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| fallback_name.clone());
+    validate_name(&name).map_err(|_| {
+        AppError::Message(format!(
+            "Skill 名称包含不安全字符，已跳过：{}",
+            main.display()
+        ))
+    })?;
     let display_name = meta
         .get("displayName")
         .or_else(|| meta.get("display_name"))
@@ -2287,13 +2457,17 @@ fn decode_known_text(bytes: &[u8]) -> AppResult<(String, String)> {
 }
 
 fn write_text_file(path: &Path, content: &str, encoding: &str) -> AppResult<()> {
-    let mut file = fs::File::create(path)?;
-    match encoding {
+    // Finish all fallible encoding work before opening the destination. Opening
+    // with File::create truncates immediately, so encoding GBK afterwards used
+    // to erase the original file when the new content was not representable.
+    let bytes = match encoding {
         "UTF-8 BOM" => {
-            file.write_all(&[0xEF, 0xBB, 0xBF])?;
-            file.write_all(content.as_bytes())?;
+            let mut bytes = Vec::with_capacity(content.len() + 3);
+            bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+            bytes.extend_from_slice(content.as_bytes());
+            bytes
         }
-        "UTF-8" => file.write_all(content.as_bytes())?,
+        "UTF-8" => content.as_bytes().to_vec(),
         "GBK" => {
             let (bytes, _, had_errors) = GBK.encode(content);
             if had_errors {
@@ -2301,10 +2475,13 @@ fn write_text_file(path: &Path, content: &str, encoding: &str) -> AppResult<()> 
                     "内容无法无损编码为 GBK，已拒绝写入。".into(),
                 ));
             }
-            file.write_all(&bytes)?;
+            bytes.into_owned()
         }
         other => return Err(AppError::Message(format!("未知编码 {other}，已拒绝写入。"))),
-    }
+    };
+    let mut file = fs::File::create(path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -2404,9 +2581,36 @@ fn list_skill_files(dir: &Path) -> AppResult<Vec<SkillFile>> {
 
 fn secure_join(root: &str, relative: &str) -> AppResult<PathBuf> {
     let root = PathBuf::from(root).canonicalize()?;
-    let path = root.join(relative);
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(AppError::Message("非法文件路径。".into()));
+    }
+
+    let mut path = root.clone();
+    for part in relative.components() {
+        let Component::Normal(segment) = part else {
+            return Err(AppError::Message("非法文件路径。".into()));
+        };
+        path.push(segment);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(AppError::Message("拒绝访问符号链接文件。".into()));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
     let parent = path.parent().unwrap_or(&path).canonicalize()?;
     if !parent.starts_with(&root) {
+        return Err(AppError::Message("非法文件路径。".into()));
+    }
+    if path.exists() && !path.canonicalize()?.starts_with(&root) {
         return Err(AppError::Message("非法文件路径。".into()));
     }
     Ok(path)
@@ -2463,20 +2667,40 @@ fn create_snapshot_if_needed(
 }
 
 fn validate_name(name: &str) -> AppResult<()> {
-    if name.trim().is_empty() || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+    let trimmed = name.trim();
+    let upper_stem = trimmed.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let windows_reserved = matches!(upper_stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper_stem.len() == 4
+            && (upper_stem.starts_with("COM") || upper_stem.starts_with("LPT"))
+            && upper_stem
+                .as_bytes()
+                .last()
+                .is_some_and(|digit| matches!(digit, b'1'..=b'9')));
+    if trimmed.is_empty()
+        || trimmed != name
+        || matches!(trimmed, "." | "..")
+        || name.len() > 200
+        || name.chars().any(char::is_control)
+        || name.ends_with([' ', '.'])
+        || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+        || windows_reserved
+    {
         return Err(AppError::Message(
-            "Skill 名称不能包含路径或系统非法字符。".into(),
+            "Skill 名称为空、过长，或包含路径/系统非法字符。".into(),
         ));
     }
     Ok(())
 }
 
 fn rewrite_skill_identity(content: &str, new_name: &str) -> String {
+    // JSON string literals are valid YAML scalars and safely preserve spaces,
+    // `#`, quotes, and other characters without creating new frontmatter keys.
+    let yaml_name = serde_json::to_string(new_name).unwrap_or_else(|_| "\"skill\"".into());
     if !content.starts_with("---") {
-        return format!("---\nname: {new_name}\ndisplayName: {new_name}\n---\n\n{content}");
+        return format!("---\nname: {yaml_name}\ndisplayName: {yaml_name}\n---\n\n{content}");
     }
     let Some(end) = content[3..].find("\n---") else {
-        return format!("---\nname: {new_name}\ndisplayName: {new_name}\n---\n\n{content}");
+        return format!("---\nname: {yaml_name}\ndisplayName: {yaml_name}\n---\n\n{content}");
     };
     let frontmatter_end = end + 3;
     let frontmatter = &content[3..frontmatter_end];
@@ -2488,27 +2712,71 @@ fn rewrite_skill_identity(content: &str, new_name: &str) -> String {
         let trimmed = line.trim_start();
         if trimmed.starts_with("name:") {
             has_name = true;
-            lines.push(format!("name: {new_name}"));
+            lines.push(format!("name: {yaml_name}"));
         } else if trimmed.starts_with("displayName:") || trimmed.starts_with("display_name:") {
             has_display_name = true;
-            lines.push(format!("displayName: {new_name}"));
+            lines.push(format!("displayName: {yaml_name}"));
         } else {
             lines.push(line.to_string());
         }
     }
     if !has_name {
-        lines.insert(0, format!("name: {new_name}"));
+        lines.insert(0, format!("name: {yaml_name}"));
     }
     if !has_display_name {
         let insert_at = if has_name { 1 } else { lines.len().min(1) };
-        lines.insert(insert_at, format!("displayName: {new_name}"));
+        lines.insert(insert_at, format!("displayName: {yaml_name}"));
     }
     format!("---\n{}\n---{}", lines.join("\n"), rest)
 }
 
+fn resolved_path_for_comparison(path: &Path) -> AppResult<PathBuf> {
+    if path.exists() {
+        return Ok(path.canonicalize()?);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Message("无法解析目标目录。".into()))?
+        .canonicalize()?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| AppError::Message("无法解析目标目录。".into()))?;
+    Ok(parent.join(name))
+}
+
+fn ensure_disjoint_paths(source: &Path, target: &Path) -> AppResult<()> {
+    let source = source.canonicalize()?;
+    let target = resolved_path_for_comparison(target)?;
+    if source == target || source.starts_with(&target) || target.starts_with(&source) {
+        return Err(AppError::Message(
+            "源 Skill 与目标目录重叠，已拒绝同步以防止数据丢失。".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn copy_dir_all(source: &Path, target: &Path) -> AppResult<()> {
+    ensure_disjoint_paths(source, target)?;
+    if fs::symlink_metadata(target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AppError::Message("拒绝复制到符号链接目录。".into()));
+    }
+    let entries = WalkDir::new(source)
+        .follow_links(false)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| AppError::Message(format!("无法读取 Skill 目录：{err}")))?;
+    for entry in &entries {
+        let file_type = entry.file_type();
+        if file_type.is_symlink() || (!file_type.is_dir() && !file_type.is_file()) {
+            return Err(AppError::Message(format!(
+                "Skill 包含不安全的链接或特殊文件，已拒绝复制：{}",
+                entry.path().display()
+            )));
+        }
+    }
+
     fs::create_dir_all(target)?;
-    for entry in WalkDir::new(source).into_iter().filter_map(Result::ok) {
+    for entry in entries {
         let src = entry.path();
         let dst = target.join(src.strip_prefix(source).unwrap());
         if entry.file_type().is_dir() {
@@ -2656,26 +2924,55 @@ mod tests {
         assert!(validate_name("good-name").is_ok());
         assert!(validate_name("../escape").is_err());
         assert!(validate_name("a/b").is_err());
+        assert!(validate_name(".").is_err());
+        assert!(validate_name("..").is_err());
+        assert!(validate_name("line\nbreak").is_err());
+        assert!(validate_name(" trailing-space ").is_err());
         assert!(validate_name("   ").is_err());
+    }
+
+    #[test]
+    fn scan_rejects_unsafe_frontmatter_name() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        let skill_dir = base.join("malicious-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: ../../outside\n---\n\n# Unsafe\n",
+        )
+        .unwrap();
+        let agent = Agent {
+            id: "test-agent".into(),
+            name: "Test Agent".into(),
+            skill_dir_paths: vec![base.to_string_lossy().to_string()],
+            icon: "test".into(),
+            detected_at: now(),
+        };
+
+        assert!(scan_one_skill(&agent, &skill_dir).is_err());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn expand_home_path_resolves_tilde() {
         let home = Path::new("/home/alice");
-        assert_eq!(expand_home_path("~", home), "/home/alice");
+        assert_eq!(PathBuf::from(expand_home_path("~", home)), home);
         assert_eq!(
-            expand_home_path("~/.config/x", home),
-            "/home/alice/.config/x"
+            PathBuf::from(expand_home_path("~/.config/x", home)),
+            home.join(".config/x")
         );
-        assert_eq!(expand_home_path("/abs/path", home), "/abs/path");
+        assert_eq!(
+            PathBuf::from(expand_home_path("/abs/path", home)),
+            PathBuf::from("/abs/path")
+        );
     }
 
     #[test]
     fn rewrite_skill_identity_updates_name_fields() {
         let original = "---\nname: old\ndisplayName: Old\ndescription: keep\n---\n\nbody";
         let out = rewrite_skill_identity(original, "fresh");
-        assert!(out.contains("name: fresh"));
-        assert!(out.contains("displayName: fresh"));
+        assert!(out.contains("name: \"fresh\""));
+        assert!(out.contains("displayName: \"fresh\""));
         assert!(out.contains("description: keep"));
         assert!(out.trim_end().ends_with("body"));
     }
@@ -2684,6 +2981,45 @@ mod tests {
     fn truncate_str_appends_ellipsis_when_clipping() {
         assert_eq!(truncate_str("hi", 10), "hi");
         assert_eq!(truncate_str("hello world", 5).chars().count(), 6);
+    }
+
+    #[test]
+    fn outbound_url_policy_requires_encryption_or_loopback() {
+        assert!(validate_outbound_url("https://api.example.com/v1", true).is_ok());
+        assert!(validate_outbound_url("http://localhost:11434/v1", true).is_ok());
+        assert!(validate_outbound_url("http://127.0.0.1:8080", true).is_ok());
+        assert!(validate_outbound_url("http://[::1]:8080", true).is_ok());
+        assert!(validate_outbound_url("http://api.example.com/v1", true).is_err());
+        assert!(validate_outbound_url("https://user:pass@example.com", true).is_err());
+        assert!(validate_outbound_url("file:///tmp/secret", true).is_err());
+        // External links are stricter than explicitly configured local APIs.
+        assert!(validate_outbound_url("http://localhost:8080", false).is_err());
+    }
+
+    #[test]
+    fn masked_api_key_is_reused_only_for_the_same_endpoint() {
+        let current = TranslationConfig {
+            protocol: "openai".into(),
+            base_url: "https://api.example.com/v1/".into(),
+            api_key: "secret".into(),
+            model: "old-model".into(),
+            target_lang: "zh-CN".into(),
+        };
+        let mut same_endpoint = TranslationConfig {
+            protocol: "OPENAI".into(),
+            base_url: "https://api.example.com/v1".into(),
+            api_key: MASKED_API_KEY.into(),
+            model: "new-model".into(),
+            target_lang: "ja".into(),
+        };
+        reconcile_masked_api_key(&current, &mut same_endpoint);
+        assert_eq!(same_endpoint.api_key, "secret");
+
+        let mut changed_endpoint = same_endpoint.clone();
+        changed_endpoint.api_key = MASKED_API_KEY.into();
+        changed_endpoint.base_url = "https://attacker.example/v1".into();
+        reconcile_masked_api_key(&current, &mut changed_endpoint);
+        assert!(changed_endpoint.api_key.is_empty());
     }
 
     #[test]
@@ -2718,6 +3054,46 @@ mod tests {
         assert!(secure_join(&root, "child.md").is_ok());
         // Escaping the root is rejected.
         assert!(secure_join(&root, "../escape.md").is_err());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_join_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        let root = base.join("root");
+        let outside = base.join("outside.md");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, "secret").unwrap();
+        symlink(&outside, root.join("linked.md")).unwrap();
+
+        assert!(secure_join(&root.to_string_lossy(), "linked.md").is_err());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn failed_gbk_encoding_preserves_original_file() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("legacy.md");
+        std::fs::write(&path, b"original").unwrap();
+
+        assert!(write_text_file(&path, "emoji: 🙂", "GBK").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn copy_rejects_overlapping_source_and_target() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        let source = base.join("skill");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("SKILL.md"), "# Test").unwrap();
+
+        assert!(copy_dir_all(&source, &source).is_err());
+        assert!(copy_dir_all(&source, &source.join("nested")).is_err());
         std::fs::remove_dir_all(&base).ok();
     }
 }
