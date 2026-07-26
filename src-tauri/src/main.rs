@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     io::Write,
     net::IpAddr,
@@ -19,7 +19,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WindowEvent,
+    AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use uuid::Uuid;
@@ -54,6 +54,10 @@ const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_UPSTREAM_SKILL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 64 * 1024;
 const MASKED_API_KEY: &str = "••••••••";
+/// 翻译输出被模型 max_tokens 截断时的统一错误文案。调用方只在 Ok 时写缓存，
+/// 因此返回该错误天然保证截断结果不会进入 translations 缓存。
+const TRANSLATION_TRUNCATED_MSG: &str =
+    "翻译输出因模型长度上限被截断，已放弃（不会写入缓存）。请换支持更长输出的模型或缩短文档。";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -271,6 +275,10 @@ struct AppState {
     db_path: PathBuf,
     data_dir: PathBuf,
     lock: Mutex<()>,
+    /// Whether the system tray was successfully created. When false the
+    /// close-to-tray behavior must be disabled, otherwise hiding the window
+    /// leaves an unreachable ghost process.
+    tray_available: std::sync::atomic::AtomicBool,
 }
 
 fn main() {
@@ -297,8 +305,15 @@ fn main() {
             // RegisterHotKey fails hard when the combo is already claimed by
             // another app — that must never abort startup and leave the user
             // with an app that "opens then instantly closes". Degrade instead.
-            if let Err(err) = setup_tray(app.handle()) {
-                eprintln!("[skillanvil] tray setup failed, continuing without it: {err}");
+            match setup_tray(app.handle()) {
+                Ok(()) => {
+                    app.state::<AppState>()
+                        .tray_available
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(err) => {
+                    eprintln!("[skillanvil] tray setup failed, continuing without it: {err}");
+                }
             }
             if let Err(err) = setup_shortcut(app.handle()) {
                 eprintln!("[skillanvil] global shortcut registration failed, continuing without it: {err}");
@@ -308,10 +323,15 @@ fn main() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
+                let tray_available = state
+                    .tray_available
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let minimize = load_settings(&state.db_path)
                     .map(|settings| settings.minimize_to_tray)
                     .unwrap_or(true);
-                if minimize {
+                // 托盘创建失败时必须放行关闭：否则窗口隐藏后没有任何入口能再
+                // 唤出主窗口，进程会变成无法退出的幽灵进程。
+                if minimize && tray_available {
                     let _ = window.hide();
                     #[cfg(target_os = "macos")]
                     let _ = window.app_handle().set_dock_visibility(false);
@@ -343,6 +363,7 @@ fn main() {
             translate_stream,
             test_translation_config,
             list_translation_models,
+            clear_translation_cache,
             check_for_updates,
             dismiss_update
         ])
@@ -375,6 +396,7 @@ fn init_state() -> AppResult<AppState> {
         db_path: data_dir.join("skillanvil.sqlite3"),
         data_dir,
         lock: Mutex::new(()),
+        tray_available: std::sync::atomic::AtomicBool::new(false),
     })
 }
 
@@ -395,7 +417,10 @@ fn setup_tray(app: &AppHandle) -> AppResult<()> {
             "open" => show_main_window(app),
             "scan" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let _ = perform_scan(&state);
+                    if perform_scan(&state).is_ok() {
+                        // 通知前端从 DB 重载（前端只重载、不再触发二次扫描）。
+                        let _ = app.emit("scan-completed", ());
+                    }
                 }
             }
             "quit" => app.exit(0),
@@ -429,6 +454,11 @@ fn setup_shortcut(app: &AppHandle) -> AppResult<()> {
 }
 
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> AppResult<()> {
+    // 空字符串表示「禁用全局快捷键」：只清理已有注册，不再注册新组合。
+    if shortcut.trim().is_empty() {
+        let _ = app.global_shortcut().unregister_all();
+        return Ok(());
+    }
     let _ = app.global_shortcut().unregister_all();
     let app_handle = app.clone();
     let register_result =
@@ -463,13 +493,13 @@ fn scan_agents(state: State<AppState>) -> AppResult<ScanResult> {
 
 #[tauri::command]
 fn get_agents(state: State<AppState>) -> AppResult<Vec<Agent>> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     load_agents(&conn)
 }
 
 #[tauri::command]
 fn get_skills(state: State<AppState>, filter: SkillFilter) -> AppResult<Vec<Skill>> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     load_skills(&conn, &filter)
 }
 
@@ -479,7 +509,7 @@ fn read_skill_file(
     skill_id: String,
     relative_path: String,
 ) -> AppResult<ReadFileResult> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     let path = secure_join(&skill.dir_path, &relative_path)?;
     read_text_file(&path)
@@ -492,6 +522,7 @@ fn save_skill_file(
     relative_path: String,
     content: String,
     expected_encoding: String,
+    expected_updated_at: String,
 ) -> AppResult<ReadFileResult> {
     let _guard = state
         .lock
@@ -500,10 +531,19 @@ fn save_skill_file(
     if contains_mojibake(&content) {
         return Err(AppError::Message("检测到疑似乱码内容，已拒绝写入。".into()));
     }
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     let path = secure_join(&skill.dir_path, &relative_path)?;
     let current = read_text_file(&path)?;
+    // 乐观并发检查：编辑器打开后文件若被外部程序（或其他 Agent）改写，
+    // 直接覆盖会丢失外部改动。错误文案必须以「文件已被外部修改」开头，
+    // 前端依赖该前缀识别此类错误。
+    if current.updated_at != expected_updated_at {
+        return Err(AppError::Message(
+            "文件已被外部修改（可能被其他程序或 Agent 更新）。请复制你的改动后重新打开文件。"
+                .into(),
+        ));
+    }
     if current.encoding != expected_encoding {
         return Err(AppError::Message(format!(
             "文件编码已变化：当前为 {}，编辑器期望为 {}。请重新加载后再保存。",
@@ -525,7 +565,7 @@ fn save_skill_file(
 
 #[tauri::command]
 fn clone_skill(state: State<AppState>, skill_id: String, new_name: String) -> AppResult<Skill> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     validate_name(&new_name)?;
     let source = PathBuf::from(&skill.dir_path);
@@ -549,19 +589,57 @@ fn clone_skill(state: State<AppState>, skill_id: String, new_name: String) -> Ap
     Ok(created)
 }
 
+/// Compute the path of a skill directory relative to its agent's skill roots.
+/// Both sides are normalized to forward slashes (trailing slash stripped) so
+/// Windows backslash paths compare correctly. Returns `None` when no root is a
+/// prefix of `skill_dir` — callers fall back to the flat `skill.name` layout.
+fn skill_rel_path(agent: &Agent, skill_dir: &str) -> Option<String> {
+    let normalize = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_string();
+    let dir = normalize(skill_dir);
+    for root in &agent.skill_dir_paths {
+        let root = normalize(root);
+        if root.is_empty() || dir.len() <= root.len() {
+            continue;
+        }
+        // 前缀必须落在路径分隔符边界上，避免 `skills` 误匹配 `skillsX`。
+        if dir.starts_with(&root) && dir.as_bytes()[root.len()] == b'/' {
+            let rest = dir[root.len() + 1..].trim_matches('/');
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[tauri::command]
 fn get_sync_targets(state: State<AppState>, skill_id: String) -> AppResult<Vec<SyncTargetStatus>> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     validate_name(&skill.name)?;
     let source_hash = hash_dir(Path::new(&skill.dir_path))?;
+    let agents = load_agents(&conn)?;
+    // 嵌套 skill（如 <root>/gstack/qa）按源侧相对路径定位目标位置；
+    // 找不到 root 前缀时退回平铺到 skill 名。
+    let rel = agents
+        .iter()
+        .find(|agent| agent.id == skill.agent_id)
+        .and_then(|agent| skill_rel_path(agent, &skill.dir_path))
+        .unwrap_or_else(|| skill.name.clone());
+    let segments: Vec<&str> = rel.split('/').collect();
+    for segment in &segments {
+        validate_name(segment)?;
+    }
     let mut result = Vec::new();
-    for agent in load_agents(&conn)? {
+    for agent in agents {
         if agent.id == skill.agent_id {
             continue;
         }
         let target_root = agent.skill_dir_paths.first().cloned().unwrap_or_default();
-        let target = Path::new(&target_root).join(&skill.name);
+        let mut target = PathBuf::from(&target_root);
+        for segment in &segments {
+            target.push(segment);
+        }
         let status = if !target.exists() {
             "missing"
         } else if hash_dir(&target)? == source_hash {
@@ -585,18 +663,35 @@ fn sync_skill(
     skill_id: String,
     target_agent_ids: Vec<String>,
 ) -> AppResult<Vec<Skill>> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     validate_name(&skill.name)?;
+    let source_agent = find_agent(&conn, &skill.agent_id)?;
+    // 嵌套 skill 同步到目标时保留相对路径（如 gstack/qa）；
+    // 找不到 root 前缀时退回平铺到 skill 名。
+    let rel = skill_rel_path(&source_agent, &skill.dir_path).unwrap_or_else(|| skill.name.clone());
+    let segments: Vec<String> = rel.split('/').map(str::to_string).collect();
+    for segment in &segments {
+        validate_name(segment)?;
+    }
     for agent_id in target_agent_ids {
         let agent = find_agent(&conn, &agent_id)?;
+        // 已知限制：目标 Agent 有多个 skill 根目录时，只写入第一个路径。
         let root = agent
             .skill_dir_paths
             .first()
             .ok_or_else(|| AppError::Message("目标 Agent 没有可写路径。".into()))?;
         fs::create_dir_all(root)?;
         let source = Path::new(&skill.dir_path);
-        let target = secure_join(root, &skill.name)?;
+        let mut target = PathBuf::from(root);
+        for segment in &segments {
+            target.push(segment);
+        }
+        // ensure_disjoint_paths 里的 resolved_path_for_comparison 需要 parent
+        // 已存在（canonicalize），因此必须先创建父目录。
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
         ensure_disjoint_paths(source, &target)?;
         if target.exists() {
             trash::delete(&target).map_err(|err| AppError::Message(err.to_string()))?;
@@ -612,13 +707,19 @@ fn sync_skill(
 
 #[tauri::command]
 fn trash_skill(state: State<AppState>, skill_id: String, agent_ids: Vec<String>) -> AppResult<()> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     if !agent_ids.contains(&skill.agent_id) {
         return Ok(());
     }
     trash::delete(&skill.dir_path).map_err(|err| AppError::Message(err.to_string()))?;
     conn.execute("delete from skills where id = ?1", params![skill_id])?;
+    // skill 行删除后，附属数据（收藏、标签、快照、溯源）一并清理，防止孤儿行
+    // 在同路径重建 skill（id 相同）时“复活”旧状态。
+    for table in ["skill_state", "skill_tags", "snapshots", "skill_provenance"] {
+        let sql = format!("delete from {table} where skill_id = ?1");
+        conn.execute(&sql, params![skill_id])?;
+    }
     Ok(())
 }
 
@@ -646,7 +747,7 @@ fn open_url(url: String) -> AppResult<()> {
 
 #[tauri::command]
 fn star_skill(state: State<AppState>, skill_id: String, starred: bool) -> AppResult<Skill> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     conn.execute(
         "insert into skill_state(skill_id, starred) values(?1, ?2)
          on conflict(skill_id) do update set starred = excluded.starred",
@@ -657,7 +758,7 @@ fn star_skill(state: State<AppState>, skill_id: String, starred: bool) -> AppRes
 
 #[tauri::command]
 fn set_skill_tags(state: State<AppState>, skill_id: String, tags: Vec<Tag>) -> AppResult<Skill> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     conn.execute(
         "delete from skill_tags where skill_id = ?1",
         params![skill_id],
@@ -678,7 +779,7 @@ fn set_skill_tags(state: State<AppState>, skill_id: String, tags: Vec<Tag>) -> A
 
 #[tauri::command]
 fn get_provenance(state: State<AppState>) -> AppResult<Vec<SkillProvenance>> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     load_provenance(&conn)
 }
 
@@ -689,7 +790,7 @@ async fn trace_skill_provenance(
 ) -> AppResult<Vec<SkillProvenance>> {
     // Resolve (id, name, local SKILL.md) up front, then release the DB connection.
     let targets: Vec<(String, String, String)> = {
-        let conn = Connection::open(&state.db_path)?;
+        let conn = open_db(&state.db_path)?;
         let all = load_skills(&conn, &SkillFilter::default())?;
         skill_ids
             .iter()
@@ -709,8 +810,7 @@ async fn trace_skill_provenance(
     for (index, (id, name, local_md)) in targets.into_iter().enumerate() {
         let prov = trace_one_provenance(&client, &id, &name, &local_md).await;
         // Best-effort persist: a transient DB lock must not abort the whole batch.
-        if let Ok(conn) = Connection::open(&state.db_path) {
-            let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        if let Ok(conn) = open_db(&state.db_path) {
             let _ = upsert_provenance(&conn, &prov);
         }
         results.push(prov);
@@ -1009,7 +1109,7 @@ fn upsert_provenance(conn: &Connection, p: &SkillProvenance) -> AppResult<()> {
 
 #[tauri::command]
 fn get_snapshots(state: State<AppState>, skill_id: String) -> AppResult<Vec<Snapshot>> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let mut stmt = conn.prepare(
         "select id, skill_id, file_path, content, created_at from snapshots
          where skill_id = ?1 order by created_at desc",
@@ -1028,7 +1128,7 @@ fn get_snapshots(state: State<AppState>, skill_id: String) -> AppResult<Vec<Snap
 
 #[tauri::command]
 fn restore_snapshot(state: State<AppState>, snapshot_id: String) -> AppResult<ReadFileResult> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let snapshot: Snapshot = conn
         .query_row(
             "select id, skill_id, file_path, content, created_at from snapshots where id = ?1",
@@ -1066,13 +1166,39 @@ fn update_settings(
     let current = load_settings(&state.db_path)?;
     reconcile_masked_api_key(&current.translation, &mut settings.translation);
     register_shortcut(&app, &settings.shortcut)?;
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     conn.execute(
         "insert into settings(key, value) values('settings', ?1)
          on conflict(key) do update set value = excluded.value",
         params![serde_json::to_string(&settings)?],
     )?;
+    reconcile_tags(&conn, &settings.custom_tags)?;
     Ok(redact_settings(settings))
+}
+
+/// 让 tags/skill_tags 双存储与 settings.custom_tags 保持一致：
+/// 逐个 upsert（改名、改色即时生效），再删除不在集合中的关联与 tag 行。
+/// 集合为空时清空两表。
+fn reconcile_tags(conn: &Connection, tags: &[Tag]) -> AppResult<()> {
+    for tag in tags {
+        conn.execute(
+            "insert into tags(id, name, color) values(?1, ?2, ?3)
+             on conflict(id) do update set name = excluded.name, color = excluded.color",
+            params![tag.id, tag.name, tag.color],
+        )?;
+    }
+    if tags.is_empty() {
+        conn.execute("delete from skill_tags", [])?;
+        conn.execute("delete from tags", [])?;
+        return Ok(());
+    }
+    let ids: Vec<&str> = tags.iter().map(|tag| tag.id.as_str()).collect();
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("delete from skill_tags where tag_id not in ({placeholders})");
+    conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))?;
+    let sql = format!("delete from tags where id not in ({placeholders})");
+    conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))?;
+    Ok(())
 }
 
 fn redact_settings(mut settings: Settings) -> Settings {
@@ -1322,6 +1448,9 @@ async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<Str
             let value: serde_json::Value = serde_json::from_slice(
                 &read_response_limited(res, MAX_JSON_RESPONSE_BYTES).await?,
             )?;
+            if value["stop_reason"] == "max_tokens" {
+                return Err(AppError::Message(TRANSLATION_TRUNCATED_MSG.into()));
+            }
             value["content"][0]["text"]
                 .as_str()
                 .map(|s| s.to_string())
@@ -1361,6 +1490,9 @@ async fn translate_text(cfg: &TranslationConfig, content: &str) -> AppResult<Str
             let value: serde_json::Value = serde_json::from_slice(
                 &read_response_limited(res, MAX_JSON_RESPONSE_BYTES).await?,
             )?;
+            if value["choices"][0]["finish_reason"] == "length" {
+                return Err(AppError::Message(TRANSLATION_TRUNCATED_MSG.into()));
+            }
             value["choices"][0]["message"]["content"]
                 .as_str()
                 .map(|s| s.to_string())
@@ -1444,6 +1576,7 @@ async fn translate_text_stream(
 
     let mut buf: Vec<u8> = Vec::new();
     let mut full = String::new();
+    let mut truncated = false;
     let mut received_bytes = 0usize;
     while let Some(bytes) = res.chunk().await? {
         received_bytes = received_bytes.saturating_add(bytes.len());
@@ -1464,6 +1597,16 @@ async fn translate_text_stream(
                     continue;
                 }
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    // 截断检测：流式事件里 max_tokens/length 表示输出被模型
+                    // 长度上限截断，流结束后整体作废。
+                    if is_anthropic {
+                        if v["type"] == "message_delta" && v["delta"]["stop_reason"] == "max_tokens"
+                        {
+                            truncated = true;
+                        }
+                    } else if v["choices"][0]["finish_reason"] == "length" {
+                        truncated = true;
+                    }
                     let delta = if is_anthropic {
                         v["delta"]["text"].as_str()
                     } else {
@@ -1478,6 +1621,9 @@ async fn translate_text_stream(
                 }
             }
         }
+    }
+    if truncated {
+        return Err(AppError::Message(TRANSLATION_TRUNCATED_MSG.into()));
     }
     Ok(full)
 }
@@ -1503,7 +1649,7 @@ async fn translate_markdown(
     };
     let key = translation_cache_key(&content, cfg.model.trim(), target);
 
-    if let Ok(conn) = Connection::open(&state.db_path) {
+    if let Ok(conn) = open_db(&state.db_path) {
         if let Ok(text) = conn.query_row(
             "select content from translations where cache_key = ?1",
             params![key],
@@ -1515,8 +1661,7 @@ async fn translate_markdown(
 
     let text = translate_text(&cfg, &content).await?;
 
-    if let Ok(conn) = Connection::open(&state.db_path) {
-        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    if let Ok(conn) = open_db(&state.db_path) {
         let _ = conn.execute(
             "insert into translations(cache_key, content, created_at) values(?1, ?2, ?3)
              on conflict(cache_key) do update set content = excluded.content, created_at = excluded.created_at",
@@ -1553,7 +1698,7 @@ async fn translate_stream(
     let key = translation_cache_key(&content, cfg.model.trim(), target);
 
     // Cache hit → return the whole text; no need to stream.
-    if let Ok(conn) = Connection::open(&state.db_path) {
+    if let Ok(conn) = open_db(&state.db_path) {
         if let Ok(text) = conn.query_row(
             "select content from translations where cache_key = ?1",
             params![key],
@@ -1565,8 +1710,7 @@ async fn translate_stream(
 
     let text = translate_text_stream(&cfg, &content, &on_chunk).await?;
 
-    if let Ok(conn) = Connection::open(&state.db_path) {
-        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+    if let Ok(conn) = open_db(&state.db_path) {
         let _ = conn.execute(
             "insert into translations(cache_key, content, created_at) values(?1, ?2, ?3)
              on conflict(cache_key) do update set content = excluded.content, created_at = excluded.created_at",
@@ -1668,12 +1812,20 @@ async fn list_translation_models(
     Ok(models)
 }
 
+/// 清空翻译缓存（translations 表全部行），返回删除的行数。
+#[tauri::command]
+fn clear_translation_cache(state: State<AppState>) -> AppResult<u64> {
+    let conn = open_db(&state.db_path)?;
+    let deleted = conn.execute("delete from translations", [])?;
+    Ok(deleted as u64)
+}
+
 fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
     let _guard = state
         .lock
         .lock()
         .map_err(|_| AppError::Message("Lock poisoned".into()))?;
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     let settings = load_settings(&state.db_path)?;
     let agents = detect_agents(&settings);
     let active_ids = agents
@@ -1686,15 +1838,20 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
     }
     let mut found = Vec::new();
     let mut scan_errors = Vec::new();
+    let mut missing_roots = Vec::new();
     for agent in &agents {
         for root in &agent.skill_dir_paths {
             let root_path = Path::new(root);
             if !root_path.exists() {
+                // 根目录暂时不可用（网络盘/移动盘未挂载、盘符变化等）≠ 其中的
+                // skill 已删除。记下来让 prune_stale_skills 跳过这些行。
+                missing_roots.push(root.clone());
                 continue;
             }
             for entry in WalkDir::new(root_path)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|entry| !is_ignored_dir(entry))
                 .filter_map(Result::ok)
                 .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
             {
@@ -1713,6 +1870,9 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
             }
         }
     }
+    let found_ids: Vec<String> = found.iter().map(|skill| skill.id.clone()).collect();
+    let error_paths: Vec<String> = scan_errors.iter().map(|issue| issue.path.clone()).collect();
+    prune_stale_skills(&conn, &found_ids, &missing_roots, &error_paths)?;
     Ok(ScanResult {
         agents: load_agents(&conn)?,
         skills: load_skills(&conn, &SkillFilter::default())?,
@@ -1721,7 +1881,10 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
 }
 
 #[tauri::command]
-async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> {
+async fn check_for_updates(
+    state: State<'_, AppState>,
+    ignore_dismissed: bool,
+) -> AppResult<UpdateInfo> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
     let client = build_http_client("SkillAnvil", true)?;
@@ -1759,25 +1922,28 @@ async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> 
     // download the installer directly instead of browsing the release page.
     let asset_url = pick_asset(&json);
 
-    // Check if user already dismissed this version
-    let conn = Connection::open(&state.db_path)?;
-    let dismissed: bool = conn
-        .query_row(
-            "select count(*) from dismissed_update where version = ?1",
-            params![latest_version],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false);
+    // Check if user already dismissed this version. Manual "check for updates"
+    // passes ignore_dismissed = true to bypass the suppression.
+    if !ignore_dismissed {
+        let conn = open_db(&state.db_path)?;
+        let dismissed: bool = conn
+            .query_row(
+                "select count(*) from dismissed_update where version = ?1",
+                params![latest_version],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
 
-    if dismissed {
-        return Ok(UpdateInfo {
-            asset_url,
-            release_url,
-            release_notes,
-            published_at,
-            ..empty()
-        });
+        if dismissed {
+            return Ok(UpdateInfo {
+                asset_url,
+                release_url,
+                release_notes,
+                published_at,
+                ..empty()
+            });
+        }
     }
 
     let has_update =
@@ -1796,7 +1962,7 @@ async fn check_for_updates(state: State<'_, AppState>) -> AppResult<UpdateInfo> 
 
 #[tauri::command]
 fn dismiss_update(state: State<'_, AppState>, version: String) -> AppResult<()> {
-    let conn = Connection::open(&state.db_path)?;
+    let conn = open_db(&state.db_path)?;
     conn.execute(
         "insert or ignore into dismissed_update(version) values(?1)",
         params![version],
@@ -1852,8 +2018,17 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     std::cmp::Ordering::Equal
 }
 
-fn init_db(path: &Path) -> AppResult<()> {
+/// Open the application database with a 5s busy timeout so concurrent
+/// readers/writers (scan、翻译缓存、溯源写入) wait briefly instead of failing
+/// immediately with SQLITE_BUSY. Setting the timeout is best-effort.
+fn open_db(path: &Path) -> AppResult<Connection> {
     let conn = Connection::open(path)?;
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+    Ok(conn)
+}
+
+fn init_db(path: &Path) -> AppResult<()> {
+    let conn = open_db(path)?;
     // WAL lets short-lived reader/writer connections coexist without blocking,
     // which matters while background provenance tracing writes during reads.
     let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -1970,6 +2145,82 @@ fn prune_inactive_agents(conn: &Connection, active_ids: &[String]) -> AppResult<
     let skill_sql = format!("delete from skills where agent_id not in ({placeholders})");
     conn.execute(&skill_sql, rusqlite::params_from_iter(active_ids.iter()))?;
     Ok(())
+}
+
+/// Remove skills rows whose directory no longer exists on disk. Runs after a
+/// full scan。「本轮扫描未找到」不等于「磁盘上已删除」：根目录暂时不可用
+/// （网络盘/移动盘未挂载）、SKILL.md 解析失败（文件被占用、乱码、名称非法）、
+/// WalkDir 的 IO 错误被吞掉等瞬态条件都会让磁盘上仍然存在的 skill 落不进
+/// `found_ids`，而快照是本应用唯一的回滚保护，误删不可恢复。因此对不在
+/// `found_ids` 中的行逐行确认后才删：
+/// - 位于本轮缺失的根目录（`missing_roots`）之下 → 状态未知，跳过；
+/// - 出现在本轮扫描错误（`error_paths`，SKILL.md 路径）中 → 目录还在，跳过；
+/// - 目录在磁盘上仍然存在 → 跳过；
+/// 只有目录确认消失的行才连同附属数据（收藏、标签、快照、溯源）一并删除，
+/// 防止孤儿行在同路径重建 skill（id 相同）时“复活”旧状态。附属表只清理本次
+/// 确认删除的 id：禁用 agent（`prune_inactive_agents`）留下的附属行必须保留——
+/// id 是确定性 `stable_id`，重新启用后行重建即自动重挂。
+fn prune_stale_skills(
+    conn: &Connection,
+    found_ids: &[String],
+    missing_roots: &[String],
+    error_paths: &[String],
+) -> AppResult<()> {
+    let found: HashSet<&str> = found_ids.iter().map(String::as_str).collect();
+    let error_dirs: HashSet<String> = error_paths
+        .iter()
+        .filter_map(|path| Path::new(path).parent())
+        .map(|dir| normalize_path_key(&dir.to_string_lossy()))
+        .collect();
+    let mut stmt = conn.prepare("select id, dir_path from skills")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (id, dir_path) in rows {
+        if found.contains(id.as_str()) {
+            continue;
+        }
+        if missing_roots
+            .iter()
+            .any(|root| path_is_under(root, &dir_path))
+        {
+            continue;
+        }
+        if error_dirs.contains(&normalize_path_key(&dir_path)) {
+            continue;
+        }
+        if Path::new(&dir_path).exists() {
+            continue;
+        }
+        conn.execute("delete from skills where id = ?1", params![id])?;
+        for table in ["skill_state", "skill_tags", "snapshots", "skill_provenance"] {
+            let sql = format!("delete from {table} where skill_id = ?1");
+            conn.execute(&sql, params![id])?;
+        }
+    }
+    Ok(())
+}
+
+/// 路径比较键：统一分隔符、去尾部斜杠、小写（Windows 路径大小写不敏感，与
+/// `stable_id` 的语义一致）。
+fn normalize_path_key(path: &str) -> String {
+    path.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// `dir_path` 是否等于 `root` 或位于其之下。前缀必须落在路径分隔符边界上，
+/// 避免 `skills` 误匹配 `skillsX`（与 `skill_rel_path` 同规则）。
+fn path_is_under(root: &str, dir_path: &str) -> bool {
+    let root = normalize_path_key(root);
+    let dir = normalize_path_key(dir_path);
+    if root.is_empty() {
+        return false;
+    }
+    if dir == root {
+        return true;
+    }
+    dir.len() > root.len() && dir.starts_with(&root) && dir.as_bytes()[root.len()] == b'/'
 }
 
 fn expand_home_path(path: &str, home: &Path) -> String {
@@ -2224,7 +2475,7 @@ fn load_tags_for_skill(conn: &Connection, skill_id: &str) -> AppResult<Vec<Tag>>
 }
 
 fn load_settings(db_path: &Path) -> AppResult<Settings> {
-    let conn = Connection::open(db_path)?;
+    let conn = open_db(db_path)?;
     let value: Option<String> = conn
         .query_row(
             "select value from settings where key = 'settings'",
@@ -2260,6 +2511,8 @@ fn normalize_settings(mut settings: Settings) -> Settings {
             target.paths = existing.paths;
             target.enabled = existing.enabled;
             target.icon = existing.icon.or_else(|| target.icon.clone());
+            // 手动分类是用户数据，合并内置 agent 时必须保留，否则每次启动被清空。
+            target.categories = existing.categories;
         } else if !default_ids.contains(&existing.id) && !existing.builtin {
             // Keep custom (non-builtin) agents that are not in defaults
             merged.push(existing);
@@ -2539,6 +2792,17 @@ fn read_meta_json(dir: &Path) -> AppResult<Option<serde_json::Value>> {
     Ok(Some(serde_json::from_str(&file.content)?))
 }
 
+/// 扫描、哈希、文件列表阶段跳过的目录：node_modules 与 .git 体量巨大，且其中
+/// 出现的 SKILL.md（依赖内嵌示例）不是用户技能。复制（copy_dir_all）不过滤，
+/// 保持副本完整。
+fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
+    entry.file_type().is_dir()
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name == "node_modules" || name == ".git")
+}
+
 fn list_skill_files(dir: &Path) -> AppResult<Vec<SkillFile>> {
     let mut files = Vec::new();
     if !dir.exists() {
@@ -2547,6 +2811,7 @@ fn list_skill_files(dir: &Path) -> AppResult<Vec<SkillFile>> {
     for entry in WalkDir::new(dir)
         .max_depth(4)
         .into_iter()
+        .filter_entry(|entry| !is_ignored_dir(entry))
         .filter_map(Result::ok)
     {
         let path = entry.path();
@@ -2616,6 +2881,34 @@ fn secure_join(root: &str, relative: &str) -> AppResult<PathBuf> {
     Ok(path)
 }
 
+/// Decide whether a new snapshot is warranted. `prev` is the latest snapshot
+/// for the same file as `(content, created_at_rfc3339)`.
+/// 规则：无 prev → 建；内容与 prev 完全相同 → 不建；非空白字符数变化率
+/// >= 5% → 建；否则（等长/小改写）仅当最近快照距 `now` 超过 10 分钟才建，
+/// 保证等量改写不会永远失去快照保护。
+fn should_snapshot(prev: Option<(&str, &str)>, content: &str, now: DateTime<Utc>) -> bool {
+    let Some((prev_content, prev_created_at)) = prev else {
+        return true;
+    };
+    if content == prev_content {
+        return false;
+    }
+    let prev_chars = prev_content.chars().filter(|c| !c.is_whitespace()).count();
+    let curr_chars = content.chars().filter(|c| !c.is_whitespace()).count();
+    let max_len = prev_chars.max(curr_chars).max(1);
+    let diff = prev_chars.abs_diff(curr_chars);
+    if (diff as f64 / max_len as f64) >= 0.05 {
+        return true;
+    }
+    match DateTime::parse_from_rfc3339(prev_created_at) {
+        Ok(created) => {
+            now.signed_duration_since(created.with_timezone(&Utc)) > chrono::Duration::minutes(10)
+        }
+        // 时间戳损坏时宁可多建一次快照，也不要静默丢失保护。
+        Err(_) => true,
+    }
+}
+
 fn create_snapshot_if_needed(
     conn: &Connection,
     data_dir: &Path,
@@ -2627,26 +2920,20 @@ fn create_snapshot_if_needed(
     if !settings.snapshots_enabled || content.trim().is_empty() {
         return Ok(());
     }
-    // PRD: only snapshot if non-whitespace character change > 5%
-    let last_content: Option<String> = conn
+    let last: Option<(String, String)> = conn
         .query_row(
-            "select content from snapshots where skill_id = ?1 and file_path = ?2 order by created_at desc limit 1",
+            "select content, created_at from snapshots where skill_id = ?1 and file_path = ?2 order by created_at desc limit 1",
             params![skill_id, relative_path],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if let Some(prev) = last_content {
-        let prev_chars: usize = prev.chars().filter(|c| !c.is_whitespace()).count();
-        let curr_chars: usize = content.chars().filter(|c| !c.is_whitespace()).count();
-        let max_len = prev_chars.max(curr_chars).max(1);
-        let diff = if curr_chars > prev_chars {
-            curr_chars - prev_chars
-        } else {
-            prev_chars - curr_chars
-        };
-        if (diff as f64 / max_len as f64) < 0.05 {
-            return Ok(());
-        }
+    if !should_snapshot(
+        last.as_ref()
+            .map(|(prev, created_at)| (prev.as_str(), created_at.as_str())),
+        content,
+        Utc::now(),
+    ) {
+        return Ok(());
     }
     conn.execute(
         "insert into snapshots(id, skill_id, file_path, content, created_at) values(?1, ?2, ?3, ?4, ?5)",
@@ -2794,14 +3081,11 @@ fn copy_dir_all(source: &Path, target: &Path) -> AppResult<()> {
 fn show_path_in_file_manager(path: &Path) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
-        let status = Command::new("explorer.exe")
+        // explorer.exe 即使成功打开窗口也会返回退出码 1（本机实测），
+        // 因此不能用退出码判断成败：spawn 成功即视为成功。
+        Command::new("explorer.exe")
             .arg(format!("/select,{}", path.to_string_lossy()))
-            .status()?;
-        if !status.success() {
-            return Err(AppError::Message(
-                "无法启动 Windows 文件资源管理器。".into(),
-            ));
-        }
+            .spawn()?;
         return Ok(());
     }
 
@@ -2841,6 +3125,7 @@ fn hash_dir(path: &Path) -> AppResult<String> {
     let mut hasher = Sha256::new();
     let mut files = WalkDir::new(path)
         .into_iter()
+        .filter_entry(|entry| !is_ignored_dir(entry))
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.path().to_path_buf())
@@ -3094,6 +3379,346 @@ mod tests {
 
         assert!(copy_dir_all(&source, &source).is_err());
         assert!(copy_dir_all(&source, &source.join("nested")).is_err());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // B1 回归：合并内置 agent 设置时必须保留手动分类。
+    #[test]
+    fn normalize_settings_preserves_builtin_categories() {
+        let mut settings = default_settings();
+        settings.custom_agents = vec![AgentPathConfig {
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
+            paths: vec!["~/.claude/skills".into()],
+            enabled: true,
+            builtin: true,
+            icon: Some("claude".into()),
+            categories: vec![SkillCategory {
+                id: "cat-1".into(),
+                name: "写作".into(),
+                skill_names: vec!["blog-post-writer".into()],
+            }],
+        }];
+        let normalized = normalize_settings(settings);
+        let agent = normalized
+            .custom_agents
+            .iter()
+            .find(|agent| agent.id == "claude-code")
+            .expect("builtin agent should survive normalization");
+        assert_eq!(agent.categories.len(), 1);
+        assert_eq!(agent.categories[0].id, "cat-1");
+        assert_eq!(agent.categories[0].skill_names, vec!["blog-post-writer"]);
+    }
+
+    fn insert_test_skill(conn: &Connection, id: &str) {
+        insert_test_skill_at(conn, id, id);
+    }
+
+    fn insert_test_skill_at(conn: &Connection, id: &str, dir_path: &str) {
+        conn.execute(
+            "insert into skills(id, name, display_name, description, version, dir_path, agent_id,
+                                source, github_repo, github_branch, last_sync_commit, local_modified, updated_at)
+             values(?1, ?1, ?1, '', '0.1.0', ?2, 'agent', 'local', null, null, null, 0, ?3)",
+            params![id, dir_path, now()],
+        )
+        .unwrap();
+    }
+
+    // B3 回归：扫描后不在 found 集合中的幽灵 skill 行与孤儿附属数据被清理。
+    #[test]
+    fn prune_stale_skills_removes_ghosts_and_orphans() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+
+        insert_test_skill(&conn, "keep");
+        insert_test_skill(&conn, "ghost");
+        conn.execute(
+            "insert into skill_state(skill_id, starred) values('ghost', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into skill_tags(skill_id, tag_id) values('ghost', 'writing')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into snapshots(id, skill_id, file_path, content, created_at)
+             values('snap', 'ghost', 'SKILL.md', 'x', ?1)",
+            params![now()],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into skill_provenance(skill_id, status) values('ghost', 'local')",
+            [],
+        )
+        .unwrap();
+
+        prune_stale_skills(&conn, &["keep".to_string()], &[], &[]).unwrap();
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(count("select count(*) from skills"), 1);
+        assert_eq!(count("select count(*) from skills where id = 'keep'"), 1);
+        assert_eq!(count("select count(*) from skill_state"), 0);
+        assert_eq!(count("select count(*) from skill_tags"), 0);
+        assert_eq!(count("select count(*) from snapshots"), 0);
+        assert_eq!(count("select count(*) from skill_provenance"), 0);
+
+        // found 为空且目录确认不在磁盘上时，剩余幽灵行同样被删除。
+        prune_stale_skills(&conn, &[], &[], &[]).unwrap();
+        assert_eq!(count("select count(*) from skills"), 0);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // 回归：瞬态条件不得触发删除——目录仍在磁盘上（WalkDir IO 错误被吞掉）、
+    // 根目录暂时不可用（网络盘/移动盘未挂载）、SKILL.md 解析失败（scan_errors）
+    // 的 skill 行与快照必须保留；只有目录确认消失的行才连同附属数据被清理。
+    #[test]
+    fn prune_stale_skills_keeps_transient_rows_and_deletes_confirmed_only() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+
+        // 目录仍存在于磁盘（本轮却未扫到）→ 保留。
+        let on_disk = base.join("on-disk");
+        std::fs::create_dir_all(&on_disk).unwrap();
+        insert_test_skill_at(&conn, "on-disk", &on_disk.to_string_lossy());
+
+        // 根目录本轮缺失 → 状态未知，即使目录当前不可达也保留。
+        let missing_root = base.join("missing-root");
+        let under_missing = missing_root.join("skill-a");
+        insert_test_skill_at(&conn, "under-missing", &under_missing.to_string_lossy());
+
+        // 本轮 scan_errors 涉及的路径（文件被占用/乱码/名称非法）→ 保留。
+        let err_dir = base.join("err-skill");
+        insert_test_skill_at(&conn, "scan-error", &err_dir.to_string_lossy());
+
+        // 目录确认消失 → 删除。
+        let gone = base.join("gone");
+        insert_test_skill_at(&conn, "gone", &gone.to_string_lossy());
+
+        for id in ["on-disk", "under-missing", "scan-error", "gone"] {
+            conn.execute(
+                "insert into snapshots(id, skill_id, file_path, content, created_at)
+                 values(?1, ?1, 'SKILL.md', 'x', ?2)",
+                params![id, now()],
+            )
+            .unwrap();
+        }
+
+        let missing_roots = vec![missing_root.to_string_lossy().to_string()];
+        let error_paths = vec![err_dir.join("SKILL.md").to_string_lossy().to_string()];
+        prune_stale_skills(&conn, &[], &missing_roots, &error_paths).unwrap();
+
+        let ids = |sql: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let mut rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows.sort();
+            rows
+        };
+        assert_eq!(
+            ids("select id from skills"),
+            ["on-disk", "scan-error", "under-missing"]
+        );
+        assert_eq!(
+            ids("select skill_id from snapshots"),
+            ["on-disk", "scan-error", "under-missing"]
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // 回归：禁用 agent（prune_inactive_agents 删除其 skills 行）后，附属数据
+    // 必须保留——id 是确定性 stable_id，重新启用后行重建即自动重挂旧快照。
+    #[test]
+    fn prune_stale_skills_keeps_orphan_rows_of_disabled_agents() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+
+        // 无对应 skills 行，模拟 prune_inactive_agents 刚删掉禁用 agent 的行。
+        conn.execute(
+            "insert into skill_state(skill_id, starred) values('disabled-skill', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into snapshots(id, skill_id, file_path, content, created_at)
+             values('snap', 'disabled-skill', 'SKILL.md', 'x', ?1)",
+            params![now()],
+        )
+        .unwrap();
+
+        prune_stale_skills(&conn, &[], &[], &[]).unwrap();
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        assert_eq!(
+            count("select count(*) from skill_state where skill_id = 'disabled-skill'"),
+            1
+        );
+        assert_eq!(
+            count("select count(*) from snapshots where skill_id = 'disabled-skill'"),
+            1
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    // path_is_under：分隔符/大小写归一化与分隔符边界。
+    #[test]
+    fn path_is_under_normalizes_separators_case_and_boundary() {
+        assert!(path_is_under(
+            "C:/Users/x/skills",
+            "c:\\users\\x\\skills\\foo"
+        ));
+        assert!(path_is_under("D:/alt/skills/", "D:/alt/skills/foo"));
+        assert!(path_is_under("D:/alt/skills", "D:/alt/skills"));
+        assert!(!path_is_under(
+            "C:/Users/x/skills",
+            "C:/Users/x/skillsX/foo"
+        ));
+        assert!(!path_is_under("C:/Users/x/skills/foo", "C:/Users/x/skills"));
+        assert!(!path_is_under("", "C:/anything"));
+    }
+
+    // B4 回归：嵌套 skill 的相对路径解析。
+    #[test]
+    fn skill_rel_path_resolves_nested_roots_and_separators() {
+        let agent = Agent {
+            id: "a".into(),
+            name: "A".into(),
+            skill_dir_paths: vec!["C:/Users/x/.claude/skills".into(), "D:/alt/skills/".into()],
+            icon: "i".into(),
+            detected_at: now(),
+        };
+        // 嵌套命中：返回多段相对路径。
+        assert_eq!(
+            skill_rel_path(&agent, "C:/Users/x/.claude/skills/gstack/qa").as_deref(),
+            Some("gstack/qa")
+        );
+        // 多 root：第二个 root 命中。
+        assert_eq!(
+            skill_rel_path(&agent, "D:/alt/skills/foo").as_deref(),
+            Some("foo")
+        );
+        // 反斜杠输入照样命中。
+        assert_eq!(
+            skill_rel_path(&agent, "C:\\Users\\x\\.claude\\skills\\bar").as_deref(),
+            Some("bar")
+        );
+        // 无前缀 → None（回退平铺）。
+        assert_eq!(skill_rel_path(&agent, "E:/elsewhere/foo"), None);
+        // 前缀必须落在分隔符边界：skillsX 不应匹配 skills。
+        assert_eq!(
+            skill_rel_path(&agent, "C:/Users/x/.claude/skillsX/foo"),
+            None
+        );
+    }
+
+    // B5 回归：快照触发策略四个分支。
+    #[test]
+    fn should_snapshot_covers_all_branches() {
+        let now_ts = Utc::now();
+        // 无 prev → true。
+        assert!(should_snapshot(None, "anything", now_ts));
+        // 内容与 prev 完全相同 → false。
+        let recent = now_ts.to_rfc3339();
+        assert!(!should_snapshot(
+            Some(("same", recent.as_str())),
+            "same",
+            now_ts
+        ));
+        // 非空白字符数变化率 >= 5% → true。
+        assert!(should_snapshot(
+            Some(("aaaaaaaaaa", recent.as_str())),
+            "aaaa",
+            now_ts
+        ));
+        // 等长改写 + 最近快照 < 10 分钟 → false。
+        let five_min_ago = (now_ts - chrono::Duration::minutes(5)).to_rfc3339();
+        assert!(!should_snapshot(
+            Some(("abcdefghij", five_min_ago.as_str())),
+            "abcdefghik",
+            now_ts
+        ));
+        // 等长改写 + 最近快照 > 10 分钟 → true。
+        let eleven_min_ago = (now_ts - chrono::Duration::minutes(11)).to_rfc3339();
+        assert!(should_snapshot(
+            Some(("abcdefghij", eleven_min_ago.as_str())),
+            "abcdefghik",
+            now_ts
+        ));
+    }
+
+    // B11 回归：settings.custom_tags 与 tags/skill_tags 双存储的对账。
+    #[test]
+    fn reconcile_tags_removes_stale_and_applies_renames() {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+
+        conn.execute(
+            "insert into tags(id, name, color) values('keep', '旧名', '#fff')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into tags(id, name, color) values('stale', '脏', '#000')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into skill_tags(skill_id, tag_id) values('s1', 'keep')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into skill_tags(skill_id, tag_id) values('s1', 'stale')",
+            [],
+        )
+        .unwrap();
+
+        let tags = vec![Tag {
+            id: "keep".into(),
+            name: "新名".into(),
+            color: "#fff".into(),
+        }];
+        reconcile_tags(&conn, &tags).unwrap();
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |row| row.get(0)).unwrap() };
+        // 重命名即时生效。
+        let name: String = conn
+            .query_row("select name from tags where id = 'keep'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "新名");
+        // 脏 tag 与其关联被清理，有效关联保留。
+        assert_eq!(count("select count(*) from tags where id = 'stale'"), 0);
+        assert_eq!(
+            count("select count(*) from skill_tags where tag_id = 'stale'"),
+            0
+        );
+        assert_eq!(
+            count("select count(*) from skill_tags where tag_id = 'keep'"),
+            1
+        );
+
+        // 集合为空时清空两表。
+        reconcile_tags(&conn, &[]).unwrap();
+        assert_eq!(count("select count(*) from tags"), 0);
+        assert_eq!(count("select count(*) from skill_tags"), 0);
         std::fs::remove_dir_all(&base).ok();
     }
 }

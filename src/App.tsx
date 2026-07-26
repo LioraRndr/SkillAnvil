@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { CSSProperties } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { ink } from "ink-mde";
 import type { Instance } from "ink-mde";
 import {
@@ -183,7 +184,13 @@ export default function App() {
   const [diffView, setDiffView] = useState<DiffView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const saveTimer = useRef<number | null>(null);
+  // 自动保存：延迟回调必须读取最新 tabs（闭包捕获的 tabs 会过期），用 ref 同步。
+  const tabsRef = useRef<Tab[]>([]);
+  // 挂起的自动保存。key 为 `${skill.id}::${selectedFile}`，保证内容只写回它所属的文件。
+  const pendingSave = useRef<{ key: string; value: string; timer: number } | null>(null);
+  // 同一 key 的在途保存 Promise：后续冲刷串行排队，避免并发保存携带过期的
+  // updatedAt 而被后端误判为「文件已被外部修改」。resolve 值表示该次保存是否成功。
+  const inflightSaves = useRef<Map<string, Promise<boolean>>>(new Map());
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editingTagId, setEditingTagId] = useState<string | null>(null);
   const [confirmDeleteCategoryId, setConfirmDeleteCategoryId] = useState<string | null>(null);
@@ -204,6 +211,36 @@ export default function App() {
     return () => clearTimeout(timer);
   }, []);
 
+  // 托盘「手动扫描」完成后后端 emit "scan-completed"：只从 DB 重载列表，
+  // 绝不能再调 scanAgents（否则会触发二次扫描死循环）。
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    listen("scan-completed", () => {
+      void (async () => {
+        try {
+          const [agentList, skillList] = await Promise.all([api.getAgents(), api.getSkills({})]);
+          setAgents(agentList);
+          setSkills(skillList);
+        } catch (err) {
+          setError(errorMessage(err));
+        }
+      })();
+    })
+      .then((fn) => {
+        // StrictMode 双挂载：若 effect 已清理，注册结果到达时立即退订。
+        if (alive) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {
+        // 非 Tauri 环境（纯浏览器 dev）无法监听，忽略。
+      });
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
+
   function dismissUpdatePanel() {
     if (updateInfo) {
       api.dismissUpdate(updateInfo.latestVersion).catch(() => {});
@@ -216,7 +253,10 @@ export default function App() {
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3000);
   }
-  const saveTimerTabId = useRef<string | null>(null);
+
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
 
   const activeTab = activeTabIndex >= 0 && activeTabIndex < tabs.length ? tabs[activeTabIndex] : null;
   const selectedSkill = activeTab?.skill ?? null;
@@ -423,7 +463,7 @@ export default function App() {
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "w") {
         event.preventDefault();
-        if (activeTab) closeTab(activeTabIndex);
+        if (activeTab) void closeTab(activeTabIndex);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -587,16 +627,57 @@ export default function App() {
     }
   }
 
-  function closeTab(index: number) {
+  async function closeTab(index: number) {
+    const tab = tabs[index];
+    if (!tab) return;
+    const key = tabId(tab.skill, tab.selectedFile);
+    // 冲刷可能要多轮：await 期间标签页仍在界面上，用户还能继续输入并重新
+    // 排定挂起保存。每轮重新读取最新状态，直到确认没有内容会随关闭丢失。
+    for (;;) {
+      const live = tabsRef.current.find((t) => tabId(t.skill, t.selectedFile) === key) ?? tab;
+      const pending = pendingSave.current;
+      if (pending && pending.key === key) {
+        // 关闭前先冲刷挂起的自动保存，防止最后 1 秒内的编辑丢失。
+        // 必须等待冲刷结果：写入被拒（如「文件已被外部修改」）时保留标签页，
+        // 否则编辑器内容随标签页销毁，提示「请复制你的改动」将无从执行。
+        window.clearTimeout(pending.timer);
+        pendingSave.current = null;
+        const ok = await flushSaveByKey(key, pending.value);
+        if (!ok) return;
+        continue;
+      }
+      if (live.saveState === "dirty") {
+        // 无挂起定时器但仍是脏状态（例如挂起保存曾被切换顶掉）：同样先冲刷并等待结果。
+        const ok = await flushSaveByKey(key, live.editorValue);
+        if (!ok) return;
+        continue;
+      }
+      if (live.saveState === "saving") {
+        // 保存在途：等它落定再关闭；失败则保留标签页让用户处置。
+        const run = inflightSaves.current.get(key);
+        if (!run) break; // 防御：已落定（ref 会被同步镜像成 saved/dirty/error），不应到达。
+        const ok = await run;
+        if (!ok) return;
+        continue;
+      }
+      if (live.saveState === "error" && live.fileState && live.editorValue !== live.fileState.content) {
+        const ok = window.confirm("该标签页有未保存的更改且上次保存失败，确定关闭并丢弃吗？");
+        if (!ok) return;
+      }
+      break;
+    }
     setTabs((prev) => {
-      const next = prev.filter((_, i) => i !== index);
+      // await 期间标签页可能增删导致 index 失效，按 key 定位要移除的标签页。
+      const idx = prev.findIndex((t) => tabId(t.skill, t.selectedFile) === key);
+      if (idx < 0) return prev;
+      const next = prev.filter((_, i) => i !== idx);
       // Adjust active index
       if (next.length === 0) {
         setActiveTabIndex(-1);
-      } else if (index < activeTabIndex) {
+      } else if (idx < activeTabIndex) {
         setActiveTabIndex(activeTabIndex - 1);
-      } else if (index === activeTabIndex) {
-        setActiveTabIndex(Math.min(index, next.length - 1));
+      } else if (idx === activeTabIndex) {
+        setActiveTabIndex(Math.min(idx, next.length - 1));
       }
       return next;
     });
@@ -606,28 +687,96 @@ export default function App() {
     setTabs((prev) => prev.map((tab, i) => (i === activeTabIndex ? { ...tab, ...patch } : tab)));
   }
 
-  function changeEditor(value: string) {
-    // Editing invalidates any cached translation for this tab.
-    updateActiveTab({ editorValue: value, saveState: "dirty", translation: undefined });
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    const currentTabId = activeTab ? tabId(activeTab.skill, activeTab.selectedFile) : null;
-    saveTimerTabId.current = currentTabId;
-    saveTimer.current = window.setTimeout(() => void saveNow(value), 1000);
+  /// 按 key（skill.id::selectedFile）把内容写回它所属的文件。同一 key 的保存
+  /// 串行排队：前一次保存落定（fileState.updatedAt 刷新）后才发起下一次，
+  /// 避免并发保存携带过期的 updatedAt 被误判为「文件已被外部修改」。
+  /// 返回该次保存是否成功。
+  function flushSaveByKey(key: string, value: string): Promise<boolean> {
+    const prior = inflightSaves.current.get(key) ?? Promise.resolve(true);
+    // performSave 内部消化所有异常（永不 reject），链条不会中断。
+    const run = prior.then(() => performSave(key, value));
+    inflightSaves.current.set(key, run);
+    void run.finally(() => {
+      if (inflightSaves.current.get(key) === run) inflightSaves.current.delete(key);
+    });
+    return run;
   }
 
-  async function saveNow(nextValue?: string) {
-    const tab = activeTab;
-    if (!tab || !tab.fileState) return;
-    const value = nextValue ?? tab.editorValue;
-    setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, saveState: "saving" as SaveState } : t)));
+  /// 真正执行一次保存。目标 tab 从 tabsRef 里现查（不是执行时的 activeTab），
+  /// 因此延迟触发时即使用户已切换或关闭标签页，内容也只会写进原来的文件，
+  /// 绝不会串台。不得直接调用——一律经 flushSaveByKey 串行化入队。
+  async function performSave(key: string, value: string): Promise<boolean> {
+    const tab = tabsRef.current.find((t) => tabId(t.skill, t.selectedFile) === key);
+    if (!tab || !tab.fileState) return false;
+    const fileState = tab.fileState;
+    setTabs((prev) => prev.map((t) => (tabId(t.skill, t.selectedFile) === key ? { ...t, saveState: "saving" as SaveState } : t)));
     try {
-      const result = await api.saveSkillFile(tab.skill.id, tab.selectedFile, value, tab.fileState.encoding);
-      setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, fileState: result, saveState: "saved" as SaveState } : t)));
+      const result = await api.saveSkillFile(tab.skill.id, tab.selectedFile, value, fileState.encoding, fileState.updatedAt);
+      // 在途保存期间用户可能继续输入：仅当编辑器内容仍等于本次写入值才置
+      // saved，否则保持 dirty（新内容由其自己的挂起定时器随后冲刷）。
+      const apply = (list: Tab[]) => list.map((t) => {
+        if (tabId(t.skill, t.selectedFile) !== key) return t;
+        return { ...t, fileState: result, saveState: (t.editorValue === value ? "saved" : "dirty") as SaveState };
+      });
+      // 同步镜像到 tabsRef：串行队列中的下一次保存可能在 React 提交前执行，
+      // 必须立刻读到新的 updatedAt，否则会误报「文件已被外部修改」。
+      tabsRef.current = apply(tabsRef.current);
+      setTabs(apply);
       setSkills(await api.getSkills({}));
+      return true;
     } catch (err) {
       setError(errorMessage(err));
-      setTabs((prev) => prev.map((t, i) => (i === activeTabIndex ? { ...t, saveState: "error" as SaveState } : t)));
+      // 失败同样同步镜像到 tabsRef：保证在途保存落定后 ref 里绝不会残留
+      // 「saving」状态（closeTab 依赖这一点判断是否还需等待）。
+      const applyError = (list: Tab[]) => list.map((t) => (tabId(t.skill, t.selectedFile) === key ? { ...t, saveState: "error" as SaveState } : t));
+      tabsRef.current = applyError(tabsRef.current);
+      setTabs(applyError);
+      return false;
     }
+  }
+
+  function changeEditor(value: string) {
+    const tab = activeTab;
+    if (!tab) return;
+    const key = tabId(tab.skill, tab.selectedFile);
+    // 按 key 而不是 index 更新：编辑器挂载时捕获的闭包可能持有过期的
+    // activeTabIndex（关闭前面的标签页会导致索引移位）。
+    // Editing invalidates any cached translation for this tab.
+    setTabs((prev) => prev.map((t) =>
+      tabId(t.skill, t.selectedFile) === key
+        ? { ...t, editorValue: value, saveState: "dirty" as SaveState, translation: undefined }
+        : t
+    ));
+    const pending = pendingSave.current;
+    if (pending) {
+      window.clearTimeout(pending.timer);
+      if (pending.key !== key) {
+        // 切换标签页后立刻冲刷上一个标签页的待保存内容，防止丢失。
+        pendingSave.current = null;
+        void flushSaveByKey(pending.key, pending.value);
+      }
+    }
+    // 记录用对象身份标识：定时器触发时只消费「自己这条」挂起记录。若在途
+    // 保存期间用户又输入并重排了新记录，新记录（及其定时器）必须原样保留，
+    // 不能被旧一轮的完成逻辑误清成孤儿。
+    const record = { key, value, timer: 0 };
+    record.timer = window.setTimeout(() => {
+      if (pendingSave.current === record) pendingSave.current = null;
+      void flushSaveByKey(key, value);
+    }, 1000);
+    pendingSave.current = record;
+  }
+
+  async function saveNow() {
+    const tab = activeTab;
+    if (!tab || !tab.fileState) return;
+    const key = tabId(tab.skill, tab.selectedFile);
+    const pending = pendingSave.current;
+    if (pending && pending.key === key) {
+      window.clearTimeout(pending.timer);
+      pendingSave.current = null;
+    }
+    await flushSaveByKey(key, tab.editorValue);
   }
 
   async function toggleTranslation() {
@@ -753,7 +902,9 @@ export default function App() {
 
   async function trashSkillDirect(skill: Skill) {
     const agent = agents.find((item) => item.id === skill.agentId);
-    const ok = window.confirm(`确认卸载 ${skill.displayName}？\n\n路径：${skill.dirPath}\n将移动到系统回收站。`);
+    const otherAgentCount = (agentPresenceBySkillName.get(skill.name) ?? []).filter((id) => id !== skill.agentId).length;
+    const presenceHint = otherAgentCount > 0 ? `\n该 Skill 还存在于另外 ${otherAgentCount} 个 Agent，本次仅删除当前 Agent 的副本。` : "";
+    const ok = window.confirm(`确认卸载 ${skill.displayName}？\n\n路径：${skill.dirPath}\n将移动到系统回收站。${presenceHint}`);
     if (!ok) return;
     try {
       await api.trashSkill(skill.id, [skill.agentId]);
@@ -784,11 +935,13 @@ export default function App() {
   async function trashSelected() {
     if (!activeTab) return;
     const agent = agents.find((item) => item.id === activeTab.skill.agentId);
-    const ok = window.confirm(`确认卸载 ${activeTab.skill.displayName}？\n\n路径：${activeTab.skill.dirPath}\n将移动到系统回收站。`);
+    const otherAgentCount = (agentPresenceBySkillName.get(activeTab.skill.name) ?? []).filter((id) => id !== activeTab.skill.agentId).length;
+    const presenceHint = otherAgentCount > 0 ? `\n该 Skill 还存在于另外 ${otherAgentCount} 个 Agent，本次仅删除当前 Agent 的副本。` : "";
+    const ok = window.confirm(`确认卸载 ${activeTab.skill.displayName}？\n\n路径：${activeTab.skill.dirPath}\n将移动到系统回收站。${presenceHint}`);
     if (!ok) return;
     try {
       await api.trashSkill(activeTab.skill.id, [activeTab.skill.agentId]);
-      closeTab(activeTabIndex);
+      void closeTab(activeTabIndex);
       setSkills(await api.getSkills({}));
       setError(agent ? `已从 ${agent.name} 移至回收站。` : "已移至回收站。");
     } catch (err) {
@@ -883,20 +1036,33 @@ export default function App() {
     }
   }
 
-  async function restoreSnapshot(snapshotId: string) {
+  async function restoreSnapshot(snapshot: Snapshot) {
     if (!activeTab) return;
+    // 后端只会改写 snapshot.skillId 对应 skill 目录下的那一个文件；跨 Agent 的
+    // 同名 skill 是不同 id、不同目录的独立实体，绝不能按 name 匹配（否则另一
+    // Agent 同名 tab 会被灌入别人的内容并标成 saved，与自己的磁盘文件脱节）。
+    const skillId = snapshot.skillId;
     const ok = window.confirm("确认回滚到该快照？当前文件内容将被覆盖。");
     if (!ok) return;
     try {
-      const result = await api.restoreSnapshot(snapshotId);
-      const snaps = await api.getSnapshots(activeTab.skill.id);
-      setTabs((prev) => prev.map((t, i) =>
-        i === activeTabIndex
-          ? { ...t, fileState: result, editorValue: result.content, saveState: "saved" as SaveState, snapshots: snaps }
-          : t
-      ));
+      const result = await api.restoreSnapshot(snapshot.id);
+      // 清掉指向同一文件（同 skill.id + 同路径）的挂起自动保存，防止陈旧内容覆盖回滚结果。
+      const pending = pendingSave.current;
+      if (pending && pending.key === `${skillId}::${snapshot.filePath}`) {
+        window.clearTimeout(pending.timer);
+        pendingSave.current = null;
+      }
+      const snaps = await api.getSnapshots(skillId);
+      // 只把回滚内容灌进「同 skill.id + 同文件」的 tab；该 skill 的其他 tab 只刷新快照列表。
+      setTabs((prev) => prev.map((t) => {
+        if (t.skill.id !== skillId) return t;
+        const patched = t.selectedFile === snapshot.filePath
+          ? { ...t, fileState: result, editorValue: result.content, saveState: "saved" as SaveState }
+          : t;
+        return { ...patched, snapshots: snaps };
+      }));
       setSkills(await api.getSkills({}));
-      setError("已回滚到选定快照。");
+      showToast(`已回滚 ${snapshot.filePath}`);
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -915,6 +1081,12 @@ export default function App() {
       setError(errorMessage(err));
     }
   }
+
+  // 统一 diff（快照 → 当前）。超大文件时为 null，回退为双栏纯文本。
+  const diffLines = useMemo(
+    () => (diffView ? computeLineDiff(diffView.snapshotContent, diffView.currentContent) : null),
+    [diffView],
+  );
 
   const handleContextMenu = useCallback((event: React.MouseEvent, skill: Skill) => {
     event.preventDefault();
@@ -1429,7 +1601,7 @@ export default function App() {
               {tab.saveState === "dirty" && <span className="tab-dot" />}
               <span
                 className="tab-close"
-                onClick={(e) => { e.stopPropagation(); closeTab(index); }}
+                onClick={(e) => { e.stopPropagation(); void closeTab(index); }}
                 title="关闭标签页"
               >
                 <X size={12} />
@@ -1649,7 +1821,7 @@ export default function App() {
                       </div>
                       <div className="snapshot-actions">
                         <button title="查看 diff" onClick={() => viewSnapshotDiff(snap)}><GitCompare size={13} /></button>
-                        <button title="回滚到此版本" onClick={() => void restoreSnapshot(snap.id)}><RotateCcw size={13} /></button>
+                        <button title="回滚到此版本" onClick={() => void restoreSnapshot(snap)}><RotateCcw size={13} /></button>
                       </div>
                     </div>
                   ))
@@ -1804,19 +1976,32 @@ export default function App() {
               </div>
               <button className="icon-button" onClick={() => setDiffView(null)}><X size={16} /></button>
             </header>
-            <div className="diff-content">
-              <div className="diff-pane">
-                <h3>快照版本</h3>
-                <pre>{diffView.snapshotContent}</pre>
+            {diffLines ? (
+              <div className="diff-content diff-content-unified">
+                <div className="diff-unified">
+                  {diffLines.map((line, index) => (
+                    <div key={index} className={line.type === "same" ? "diff-line" : `diff-line ${line.type}`}>
+                      <span className="diff-line-sign">{line.type === "add" ? "+" : line.type === "del" ? "-" : " "}</span>
+                      <span className="diff-line-text">{line.text}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="diff-pane">
-                <h3>当前版本</h3>
-                <pre>{diffView.currentContent}</pre>
+            ) : (
+              <div className="diff-content">
+                <div className="diff-pane">
+                  <h3>快照版本</h3>
+                  <pre>{diffView.snapshotContent}</pre>
+                </div>
+                <div className="diff-pane">
+                  <h3>当前版本</h3>
+                  <pre>{diffView.currentContent}</pre>
+                </div>
               </div>
-            </div>
+            )}
             <footer>
               <button onClick={() => setDiffView(null)}>关闭</button>
-              <button className="primary" onClick={() => { void restoreSnapshot(diffView.snapshot.id); setDiffView(null); }}>
+              <button className="primary" onClick={() => { void restoreSnapshot(diffView.snapshot); setDiffView(null); }}>
                 <RotateCcw size={14} /> 回滚到快照版本
               </button>
             </footer>
@@ -2409,17 +2594,33 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
   const [detectError, setDetectError] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [checkUpdateResult, setCheckUpdateResult] = useState<UpdateInfo | null>(null);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [clearCacheResult, setClearCacheResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   async function runUpdateCheck() {
     setCheckingUpdate(true);
     setCheckUpdateResult(null);
     try {
-      const result = await api.checkForUpdates();
+      // 手动检查更新要无视「忽略此版本」记录，否则被忽略过的新版本永远查不到。
+      const result = await api.checkForUpdates(true);
       setCheckUpdateResult(result);
     } catch {
       setCheckUpdateResult(null);
     } finally {
       setCheckingUpdate(false);
+    }
+  }
+
+  async function runClearTranslationCache() {
+    setClearingCache(true);
+    setClearCacheResult(null);
+    try {
+      const removed = await api.clearTranslationCache();
+      setClearCacheResult({ ok: true, message: `已清除 ${removed} 条缓存` });
+    } catch (err) {
+      setClearCacheResult({ ok: false, message: errorMessage(err) });
+    } finally {
+      setClearingCache(false);
     }
   }
 
@@ -2692,6 +2893,15 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
             {models.map((m) => <option key={m} value={m} />)}
           </datalist>
         </label>
+        <label className="field-row">
+          <span>目标语言</span>
+          <input
+            type="text"
+            value={settings.translation.targetLang}
+            placeholder="zh-CN（可填 en、ja 等）"
+            onChange={(e) => setTranslation({ targetLang: e.target.value })}
+          />
+        </label>
         <div className="translate-test">
           <button
             className="ghost-button"
@@ -2719,6 +2929,14 @@ function SettingsPanel({ settings, onChange, agents, traceProgress, onTraceScope
           <button className="ghost-button" onClick={() => void runTranslationTest()} disabled={testing}>
             {testing ? "测试中…" : "测试连接"}
           </button>
+          <button className="ghost-button" onClick={() => void runClearTranslationCache()} disabled={clearingCache}>
+            {clearingCache ? "清除中…" : "清除翻译缓存"}
+          </button>
+          {clearCacheResult && (
+            <span className={clearCacheResult.ok ? "test-chip ok" : "test-chip err"} title={clearCacheResult.message}>
+              {clearCacheResult.ok ? `✓ ${clearCacheResult.message}` : `✗ ${clearCacheResult.message}`}
+            </span>
+          )}
           {detectError && <span className="test-chip err" title={detectError}>✗ {detectError}</span>}
           {!detectError && models.length > 0 && <span className="test-chip ok">✓ 检测到 {models.length} 个模型</span>}
           {testResult && (
@@ -2960,6 +3178,11 @@ function ShortcutInput({ value, onChange }: { value: string; onChange: (value: s
   const [display, setDisplay] = useState(value);
   const ref = useRef<HTMLInputElement>(null);
 
+  // 设置是 boot 后异步到达的：非录制状态下让显示跟随外部 value 变化。
+  useEffect(() => {
+    if (!recording) setDisplay(value);
+  }, [value, recording]);
+
   function handleKeyDown(event: React.KeyboardEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -2992,17 +3215,31 @@ function ShortcutInput({ value, onChange }: { value: string; onChange: (value: s
     setDisplay(value);
   }
 
+  // 空字符串表示「禁用全局快捷键」（后端遇空串只 unregister，不注册）。
+  const shown = recording ? display : value === "" ? "已禁用（点击可重新录制）" : display;
+
   return (
-    <input
-      ref={ref}
-      className={recording ? "shortcut-input recording" : "shortcut-input"}
-      value={display}
-      readOnly
-      onFocus={handleFocus}
-      onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
-      placeholder="点击后按下组合键"
-    />
+    <span className="shortcut-input-group">
+      <input
+        ref={ref}
+        className={recording ? "shortcut-input recording" : "shortcut-input"}
+        value={shown}
+        readOnly
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        placeholder="点击后按下组合键"
+      />
+      <button
+        type="button"
+        className="ghost-button shortcut-disable-btn"
+        onClick={() => onChange("")}
+        disabled={value === ""}
+        title="禁用全局快捷键"
+      >
+        禁用
+      </button>
+    </span>
   );
 }
 
@@ -3266,14 +3503,54 @@ function bundleRootOf(skill: Skill, agents: Agent[]): string {
   return parts[parts.length - 1] || skill.name;
 }
 
-function agentInitials(name: string) {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0])
-    .join("")
-    .toUpperCase();
+type DiffLine = { type: "same" | "add" | "del"; text: string };
+
+/// 按行 LCS 计算统一 diff（a=快照/旧，b=当前/新）：del 为快照里被删掉的行，
+/// add 为当前版本新增的行。任一侧超过 3000 行时返回 null，由调用方回退为
+/// 双栏纯文本展示（LCS 是 O(n*m)，超大文件会卡住 UI）。
+function computeLineDiff(a: string, b: string): DiffLine[] | null {
+  const aLines = a.split("\n");
+  const bLines = b.split("\n");
+  const MAX_LINES = 3000;
+  if (aLines.length > MAX_LINES || bLines.length > MAX_LINES) return null;
+  const n = aLines.length;
+  const m = bLines.length;
+  // lcs[i][j] = aLines[i..] 与 bLines[j..] 的 LCS 长度（后缀 DP，便于正序回溯）。
+  const width = m + 1;
+  const lcs = new Uint32Array((n + 1) * width);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i * width + j] =
+        aLines[i] === bLines[j]
+          ? lcs[(i + 1) * width + j + 1] + 1
+          : Math.max(lcs[(i + 1) * width + j], lcs[i * width + j + 1]);
+    }
+  }
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (aLines[i] === bLines[j]) {
+      out.push({ type: "same", text: aLines[i] });
+      i++;
+      j++;
+    } else if (lcs[(i + 1) * width + j] >= lcs[i * width + j + 1]) {
+      out.push({ type: "del", text: aLines[i] });
+      i++;
+    } else {
+      out.push({ type: "add", text: bLines[j] });
+      j++;
+    }
+  }
+  while (i < n) {
+    out.push({ type: "del", text: aLines[i] });
+    i++;
+  }
+  while (j < m) {
+    out.push({ type: "add", text: bLines[j] });
+    j++;
+  }
+  return out;
 }
 
 function statusLabel(status: SyncTargetStatus["status"]) {
