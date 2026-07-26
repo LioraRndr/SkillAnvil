@@ -1413,6 +1413,17 @@ button {
   background: color-mix(in srgb, var(--accent) 10%, var(--panel-soft)) !important;
 }
 
+.shortcut-input-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shortcut-disable-btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .custom-select {
   position: relative;
   min-width: 166px;
@@ -2640,6 +2651,58 @@ input[type="checkbox"]:focus-visible {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 统一 diff 视图（按行 LCS 高亮）。配色用语义变量，深浅主题均可读。 */
+.diff-content-unified {
+  display: block;
+  background: var(--panel-solid);
+}
+
+.diff-unified {
+  padding: 10px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.diff-line-sign {
+  flex: none;
+  width: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.diff-line-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line.add {
+  color: var(--text);
+  background: color-mix(in srgb, var(--good) 16%, transparent);
+}
+
+.diff-line.add .diff-line-sign {
+  color: var(--good);
+}
+
+.diff-line.del {
+  color: var(--text);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.diff-line.del .diff-line-sign {
+  color: var(--danger);
 }
 
 .diff-modal footer button {

@@ -31,8 +31,10 @@ export const api = {
   getSkills: (filter: SkillFilter = {}) => call<Skill[]>("get_skills", { filter }),
   readSkillFile: (skillId: string, relativePath: string) =>
     call<ReadFileResult>("read_skill_file", { skillId, relativePath }),
-  saveSkillFile: (skillId: string, relativePath: string, content: string, expectedEncoding: string) =>
-    call<ReadFileResult>("save_skill_file", { skillId, relativePath, content, expectedEncoding }),
+  // expectedUpdatedAt：读取该文件时返回的 ReadFileResult.updatedAt；后端写入前校验，
+  // 若磁盘上的文件已被外部修改则拒绝写入（错误文案以「文件已被外部修改」开头）。
+  saveSkillFile: (skillId: string, relativePath: string, content: string, expectedEncoding: string, expectedUpdatedAt: string) =>
+    call<ReadFileResult>("save_skill_file", { skillId, relativePath, content, expectedEncoding, expectedUpdatedAt }),
   cloneSkill: (skillId: string, newName: string) => call<Skill>("clone_skill", { skillId, newName }),
   getSyncTargets: (skillId: string) => call<SyncTargetStatus[]>("get_sync_targets", { skillId }),
   syncSkill: (skillId: string, targetAgentIds: string[]) =>
@@ -67,6 +69,9 @@ export const api = {
     call<{ ok: boolean; latencyMs: number; message: string }>("test_translation_config", { config }),
   listTranslationModels: (config: TranslationConfig) =>
     call<string[]>("list_translation_models", { config }),
-  checkForUpdates: () => call<UpdateInfo>("check_for_updates"),
+  /** 清空 translations 表的全部缓存，返回删除行数。 */
+  clearTranslationCache: () => call<number>("clear_translation_cache"),
+  // ignoreDismissed 为 true 时跳过「忽略此版本」记录（用于手动检查更新）。
+  checkForUpdates: (ignoreDismissed = false) => call<UpdateInfo>("check_for_updates", { ignoreDismissed }),
   dismissUpdate: (version: string) => call<void>("dismiss_update", { version })
 };
