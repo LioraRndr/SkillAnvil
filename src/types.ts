@@ -18,6 +18,20 @@ export interface Agent {
   detectedAt: string;
 }
 
+export interface AgentInstallation {
+  agentId: string;
+  name: string;
+  status: "installed" | "configured" | "notFound";
+  enabled: boolean;
+  canEnable: boolean;
+  evidence: { kind: "command" | "application" | "extension" | "config"; path: string }[];
+}
+
+export interface EnableInstalledAgentsResult {
+  settings: Settings;
+  enabledAgentIds: string[];
+}
+
 export interface Skill {
   id: string;
   name: string;

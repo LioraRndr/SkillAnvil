@@ -1,0 +1,48 @@
+Third-party logo sources
+
+The logos identify the corresponding products. Product names and brand marks
+remain the property of their respective owners.
+
+LobeHub @lobehub/icons-static-svg 1.95.1 (MIT):
+https://github.com/lobehub/lobe-icons
+https://registry.npmjs.org/@lobehub/icons-static-svg/1.95.1
+New files: cursor.svg, githubcopilot.svg, devin-color.svg, deepseek-color.svg,
+geminicli-color.svg, pi.svg, qwen-color.svg, grok.svg.
+Existing LobeHub brand icons are also covered by the notice below.
+The npm tarball's SHA-512 integrity was verified before extracting selected SVGs.
+
+Other product marks:
+aider.svg:
+https://github.com/Aider-AI/aider/blob/main/aider/website/assets/logo.svg
+Apache-2.0; see licenses/aider-Apache-2.0.txt in this distribution.
+warp.svg:
+https://github.com/simple-icons/simple-icons/blob/develop/icons/warp.svg
+Simple Icons, CC0 1.0 Universal:
+https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md
+zcode.png:
+https://zcode.z.ai/images/hero-visual/zcode-logo@2x.png
+workbuddy.svg:
+https://download.codebuddy.cn/web/website/a156fee78f35e874d407848198e5f96a4cf383ef/assets/logo.svg
+This WorkBuddy asset is linked by https://www.codebuddy.cn/work
+
+LobeHub MIT License
+
+Copyright (c) 2023 LobeHub
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

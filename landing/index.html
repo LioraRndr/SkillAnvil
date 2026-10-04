@@ -3,253 +3,455 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0c0a08" />
     <meta
       name="description"
-      content="SkillAnvil 是一款本地优先的 Coding Agent Skill 桌面工作台，用于扫描、编辑、同步、快照和溯源本地 Skills。"
+      content="SkillAnvil 是一座本地优先的技能铁砧：扫描、编辑、同步、快照、溯源你的 Coding Agent Skill。内置 Claude Code、Codex、Kiro、Antigravity 等 17 个 Agent 支持，技能与密钥始终留在本机。"
     />
-    <title>SkillAnvil | Coding Agent Skill 工作台</title>
-    <link rel="icon" href="./assets/skillanvil-logo.png" />
+    <title>SkillAnvil — 本地优先的 Coding Agent Skill 锻造台</title>
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="SkillAnvil — 本地优先的 Coding Agent Skill 锻造台" />
+    <meta
+      property="og:description"
+      content="扫描 17 个 Coding Agent 的技能目录，编码安全地编辑 SKILL.md，跨 Agent 同步、快照回滚、注册表溯源、自带端点翻译。本地优先，开源 MIT。"
+    />
+    <meta property="og:image" content="./screenshot.jpeg" />
+    <link rel="icon" type="image/png" href="./assets/skillanvil-logo.png" />
+    <link rel="apple-touch-icon" href="./assets/skillanvil-logo.png" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <header class="site-header">
-      <a class="brand-mark" href="#top" aria-label="SkillAnvil 首页">
-        <img src="./assets/skillanvil-logo.png" alt="" />
-        <span>SkillAnvil</span>
-      </a>
-      <nav class="site-nav" aria-label="页面导航">
-        <a href="#workflow">工作流</a>
-        <a href="#features">能力</a>
-        <a href="#download">下载</a>
-      </nav>
-      <a class="header-action" href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noreferrer">
-        GitHub
-      </a>
+    <a class="skip-link" href="#main">跳到主内容</a>
+
+    <header class="site-nav">
+      <div class="container nav-inner">
+        <a class="brand" href="#top" aria-label="SkillAnvil 首页">
+          <img class="brand-logo" src="./assets/skillanvil-logo.png" alt="" width="30" height="30" />
+          <span class="brand-word">SkillAnvil</span>
+        </a>
+        <nav class="nav-links" aria-label="页面导航">
+          <a href="#features">能力</a>
+          <a href="#workflow">工作流</a>
+          <a href="#privacy">隐私</a>
+          <a href="#agents">Agent</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+        <div class="nav-actions">
+          <a class="nav-github" href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noopener">
+            GitHub
+          </a>
+          <a class="btn btn-primary btn-sm" href="https://github.com/LioraRndr/SkillAnvil/releases/latest" target="_blank" rel="noopener">
+            下载
+          </a>
+        </div>
+      </div>
     </header>
 
-    <main id="top">
-      <section class="hero section-shell" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow">Local-first Skill Workbench</p>
-          <h1 id="hero-title">SkillAnvil</h1>
-          <p class="hero-lede">
-            管理多种本地 Coding Agent 的 Skill 目录。浏览、编辑、打标签、同步和追溯来源，
-            都在桌面端完成。
+    <main id="main">
+      <!-- ============ Hero ============ -->
+      <section class="hero" id="top">
+        <div class="container hero-inner">
+          <p class="hero-badge"><span class="badge-dot" aria-hidden="true"></span>本地优先 · 开源 · MIT</p>
+          <p class="hero-kicker" lang="en">Forge every skill on one anvil.</p>
+          <h1 class="hero-title">
+            所有 Agent 的 Skill，<br />
+            <span class="hl">都在这座铁砧上锻造</span>
+          </h1>
+          <p class="hero-sub">
+            SkillAnvil 在本机扫描 Claude Code、Codex、Kiro、Antigravity 等 17 个 Coding
+            Agent 的技能目录：编码安全的 Markdown 编辑、内容哈希同步、快照回滚、注册表溯源、自带端点的流式翻译——技能与密钥，始终留在你手里。
           </p>
-          <div class="hero-actions" aria-label="主要操作">
-            <a class="primary-action" href="#download">下载应用</a>
-            <a class="secondary-action" href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noreferrer">
+          <div class="hero-ctas">
+            <a class="btn btn-primary" href="https://github.com/LioraRndr/SkillAnvil/releases/latest" target="_blank" rel="noopener">
+              免费下载
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noopener">
               查看源码
             </a>
           </div>
-          <dl class="hero-facts" aria-label="产品摘要">
-            <div>
-              <dt>编码</dt>
-              <dd>UTF-8 / BOM / GBK</dd>
-            </div>
-            <div>
-              <dt>运行</dt>
-              <dd>Tauri 2 Desktop</dd>
-            </div>
-            <div>
-              <dt>网络</dt>
-              <dd>本地优先</dd>
-            </div>
-          </dl>
-        </div>
+          <p class="hero-meta"><span>macOS · Windows · Linux</span><i aria-hidden="true"></i><span>无需登录 · 无后台服务</span></p>
 
-        <div class="product-preview" aria-label="SkillAnvil 工作台界面预览">
-          <div class="preview-topbar">
-            <span></span>
-            <span></span>
-            <span></span>
-            <strong>Skill 总览</strong>
-          </div>
-          <div class="preview-grid">
-            <aside class="preview-sidebar">
-              <div class="preview-brand">
-                <img src="./assets/skillanvil-logo.png" alt="" />
-                <span>SkillAnvil</span>
+          <!-- 纯 CSS 应用界面示意 -->
+          <div class="hero-stage">
+            <div class="app-mock" role="img" aria-label="SkillAnvil 应用界面示意：左侧是 Agent 与标签列表，右侧是技能卡片和 SKILL.md 编辑区">
+              <div class="mock-titlebar">
+                <span class="tl tl-r" aria-hidden="true"></span>
+                <span class="tl tl-y" aria-hidden="true"></span>
+                <span class="tl tl-g" aria-hidden="true"></span>
+                <span class="mock-title">SkillAnvil — Skill 总览</span>
+                <span class="mock-pill">本地</span>
               </div>
-              <div class="preview-search">搜索</div>
-              <p>Agents</p>
-              <button class="active">Codex <b>24</b></button>
-              <button>Claude Code <b>18</b></button>
-              <button>Antigravity <b>11</b></button>
-              <p>标签</p>
-              <button><i class="tag tag-blue"></i>写作</button>
-              <button><i class="tag tag-green"></i>开发</button>
-              <button><i class="tag tag-amber"></i>审查</button>
-            </aside>
-            <section class="preview-main">
-              <div class="preview-main-head">
-                <div>
-                  <h2>Skill 总览</h2>
-                  <span>扫描、编辑和同步本地 Coding Agent Skills</span>
-                </div>
-                <div class="preview-stats">
-                  <span>3 Agents</span>
-                  <span>53 Skills</span>
-                </div>
-              </div>
-              <div class="skill-cards">
-                <article>
-                  <header>
-                    <b>frontend-design</b>
-                    <span>已验证</span>
-                  </header>
-                  <p>创建符合产品调性的前端界面，保持设计一致性。</p>
-                  <footer>
-                    <small>v0.1.0</small>
-                    <button>编辑</button>
-                  </footer>
-                </article>
-                <article>
-                  <header>
-                    <b>openai-docs</b>
-                    <span>疑似</span>
-                  </header>
-                  <p>读取官方文档并把接口约束落到代码实现里。</p>
-                  <footer>
-                    <small>v0.2.3</small>
-                    <button>同步</button>
-                  </footer>
-                </article>
-                <article class="editor-card">
-                  <header>
-                    <b>SKILL.md</b>
-                    <span>UTF-8</span>
-                  </header>
-                  <pre># Skill
-Use this skill when...
+              <div class="mock-body">
+                <aside class="mock-side">
+                  <div class="mock-search">搜索技能…</div>
+                  <p class="mock-label">Agents</p>
+                  <div class="mock-agent is-active"><span class="dot dot-steel" aria-hidden="true"></span>Claude Code<em>12</em></div>
+                  <div class="mock-agent"><span class="dot dot-sand" aria-hidden="true"></span>Codex<em>9</em></div>
+                  <div class="mock-agent"><span class="dot dot-ember" aria-hidden="true"></span>Kiro<em>6</em></div>
+                  <div class="mock-agent"><span class="dot dot-moss" aria-hidden="true"></span>Antigravity<em>4</em></div>
+                  <p class="mock-label">标签</p>
+                  <div class="mock-tag"><span class="dot dot-blue" aria-hidden="true"></span>写作</div>
+                  <div class="mock-tag"><span class="dot dot-green" aria-hidden="true"></span>开发</div>
+                  <div class="mock-tag"><span class="dot dot-amber" aria-hidden="true"></span>审查</div>
+                </aside>
+                <div class="mock-main">
+                  <div class="mock-main-head">
+                    <div>
+                      <p class="mock-h">Skill 总览</p>
+                      <p class="mock-sub">扫描、编辑和同步本地 Coding Agent Skills</p>
+                    </div>
+                    <div class="mock-counts"><span>4 Agents</span><span>31 Skills</span></div>
+                  </div>
+                  <div class="mock-cards">
+                    <div class="mock-card">
+                      <div class="mock-card-top">
+                        <span class="mock-name">code-reviewer</span>
+                        <span class="badge badge-ok">已验证</span>
+                      </div>
+                      <p class="mock-desc">按团队规范审查 diff，输出阻塞项与改进建议。</p>
+                      <div class="mock-card-foot"><span class="mock-ver">v0.4.1</span><span class="mock-btn">编辑</span></div>
+                    </div>
+                    <div class="mock-card">
+                      <div class="mock-card-top">
+                        <span class="mock-name">release-notes</span>
+                        <span class="badge badge-warn">疑似同名</span>
+                      </div>
+                      <p class="mock-desc">从提交历史生成符合 Keep a Changelog 的发布说明。</p>
+                      <div class="mock-card-foot"><span class="mock-ver">v1.2.0</span><span class="mock-btn">同步</span></div>
+                    </div>
+                  </div>
+                  <div class="mock-editor">
+                    <div class="mock-editor-head">
+                      <span class="mock-file">SKILL.md</span>
+                      <span class="badge badge-enc">UTF-8</span>
+                    </div>
+                    <pre class="mock-code"><span class="c-dim"># Code Reviewer</span>
+Use this skill when reviewing a diff…
 
-## Workflow
+<span class="c-ember">## Workflow</span>
 1. Inspect
 2. Edit
-3. Verify</pre>
-                </article>
+3. Verify<span class="caret" aria-hidden="true"></span></pre>
+                  </div>
+                </div>
               </div>
-            </section>
+            </div>
+            <div class="float-chip chip-a" aria-hidden="true"><span class="chip-dot ok"></span>已同步 → Codex</div>
+            <div class="float-chip chip-b" aria-hidden="true"><span class="chip-dot clock"></span>快照 · 一键还原</div>
+            <div class="float-chip chip-c" aria-hidden="true"><span class="chip-dot enc"></span>GBK → UTF-8 无乱码</div>
           </div>
         </div>
       </section>
 
-      <section class="signal-strip" aria-label="核心能力">
-        <div class="section-shell strip-grid">
-          <span>统一扫描多 Agent Skill 目录</span>
-          <span>编码感知 Markdown 编辑</span>
-          <span>快照、同步、溯源一体化</span>
-        </div>
-      </section>
-
-      <section id="workflow" class="section-shell workflow-section" aria-labelledby="workflow-title">
-        <div class="section-intro">
-          <p class="eyebrow">Workflow</p>
-          <h2 id="workflow-title">从散落目录到可维护资产</h2>
-          <p>
-            SkillAnvil 面向已经在多种 Coding Agent 之间切换的人。它不替你发明新的规范，
-            而是把现有目录读进来，让同步、版本和来源变得可见。
-          </p>
-        </div>
-        <div class="workflow-steps">
-          <article>
-            <span>01</span>
-            <h3>扫描</h3>
-            <p>识别本地 Agent 的 Skill 文件夹，自动聚合同名 Skill 和同源合集。</p>
-          </article>
-          <article>
-            <span>02</span>
-            <h3>整理</h3>
-            <p>用收藏、标签和子分类维护你的工作方式，不改变原始目录结构。</p>
-          </article>
-          <article>
-            <span>03</span>
-            <h3>编辑</h3>
-            <p>打开 SKILL.md 或相关文件，保留原编码写回，并在保存时生成快照。</p>
-          </article>
-          <article>
-            <span>04</span>
-            <h3>同步</h3>
-            <p>对比目标 Agent 的内容状态，只把需要更新的 Skill 同步过去。</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="features" class="section-shell feature-section" aria-labelledby="features-title">
-        <div class="section-intro compact">
-          <p class="eyebrow">Capabilities</p>
-          <h2 id="features-title">为 Skill 维护做的具体功能</h2>
-        </div>
-        <div class="feature-grid">
-          <article>
-            <h3>统一管理</h3>
-            <p>在一个窗口里查看多个 Agent 的 Skill，避免在不同隐藏目录之间来回翻找。</p>
-          </article>
-          <article>
-            <h3>编码感知</h3>
-            <p>读取并写回 UTF-8、UTF-8 BOM、GBK 文件，降低中文 Skill 被转码破坏的风险。</p>
-          </article>
-          <article>
-            <h3>跨 Agent 同步</h3>
-            <p>用内容哈希判断相同、不同或缺失，只显示真正需要处理的目标。</p>
-          </article>
-          <article>
-            <h3>快照历史</h3>
-            <p>保存时记录版本，后续可以查看差异或一键回滚到旧快照。</p>
-          </article>
-          <article>
-            <h3>来源溯源</h3>
-            <p>对照公共 Skill 注册表和上游 SKILL.md，标记已验证、疑似、本地或歧义来源。</p>
-          </article>
-          <article>
-            <h3>自带翻译接口</h3>
-            <p>使用你自己的 OpenAI 兼容或 Anthropic 原生接口，只在触发翻译时发送内容。</p>
-          </article>
-        </div>
-      </section>
-
-      <section class="privacy-band" aria-labelledby="privacy-title">
-        <div class="section-shell privacy-layout">
-          <div>
-            <p class="eyebrow">Privacy</p>
-            <h2 id="privacy-title">本地优先，不把你的 Skill 内容默认上传</h2>
+      <!-- ============ Agent 跑马灯 ============ -->
+      <div class="marquee" aria-label="内置支持的 Coding Agent">
+        <div class="marquee-track">
+          <div class="marquee-group">
+            <span>Claude Code</span><span>Codex</span><span>Kiro</span><span>Antigravity</span><span>Kilo Code</span><span>Roo Code</span><span>Goose</span><span>OpenClaw</span><span>TRAE IDE</span><span>Cline</span><span>Kimi Code CLI</span><span>CodeBuddy</span><span>Junie</span><span>OpenHands</span><span>Qoder</span><span>Zencoder</span><span>Hermes Agent</span><span>自定义目录…</span>
           </div>
-          <p>
-            应用只在检查更新、用户主动溯源或用户主动翻译时联网。溯源发送的是 Skill 名称，
-            翻译使用你配置的接口和密钥。设置保存在本机应用数据目录。
-          </p>
+          <div class="marquee-group" aria-hidden="true">
+            <span>Claude Code</span><span>Codex</span><span>Kiro</span><span>Antigravity</span><span>Kilo Code</span><span>Roo Code</span><span>Goose</span><span>OpenClaw</span><span>TRAE IDE</span><span>Cline</span><span>Kimi Code CLI</span><span>CodeBuddy</span><span>Junie</span><span>OpenHands</span><span>Qoder</span><span>Zencoder</span><span>Hermes Agent</span><span>自定义目录…</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ 能力 ============ -->
+      <section class="section" id="features">
+        <div class="container">
+          <header class="section-head reveal">
+            <span class="section-num" aria-hidden="true">01</span>
+            <p class="eyebrow">能力 · Features</p>
+            <h2>把 Skill 的整条流水线，<br class="br-lg" />收进一个窗口</h2>
+            <p class="section-lede">从扫描到同步，每一环都为「不弄坏你的文件」而设计。</p>
+          </header>
+          <div class="feature-grid">
+            <article class="feature-card reveal">
+              <span class="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><circle cx="12" cy="12" r="3" /></svg>
+              </span>
+              <h3>统一扫描全部 Agent</h3>
+              <p>内置 17 个主流 Coding Agent 的目录定义，启动即扫描；名单之外的 Agent，加一条自定义路径即可接入。</p>
+            </article>
+            <article class="feature-card reveal">
+              <span class="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6" /><path d="m10 13-2 2 2 2" /><path d="m14 17 2-2-2-2" /></svg>
+              </span>
+              <h3>编码感知的 Markdown 编辑</h3>
+              <p>自动识别 UTF-8、UTF-8 BOM 与 GBK；遇到未知编码或乱码特征直接拒绝写入，不让一次保存毁掉整份 SKILL.md。</p>
+            </article>
+            <article class="feature-card reveal">
+              <span class="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 4 4-4 4" /><path d="M20 7H8.5a4.5 4.5 0 0 0 0 9H11" /><path d="m8 21-4-4 4-4" /><path d="M4 17h11.5a4.5 4.5 0 0 0 0-9H13" /></svg>
+              </span>
+              <h3>内容哈希跨 Agent 同步</h3>
+              <p>同步前逐字比对，相同 / 不同 / 缺失三种状态一目了然，不会悄悄覆盖你在别处改过的版本。</p>
+            </article>
+            <article class="feature-card reveal">
+              <span class="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></svg>
+              </span>
+              <h3>快照与一键回滚</h3>
+              <p>每次保存自动留存快照，任何时候一键回到历史版本。大胆改，随时退。</p>
+            </article>
+            <article class="feature-card reveal">
+              <span class="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3" /><circle cx="18" cy="6" r="3" /><circle cx="12" cy="18" r="3" /><path d="M18 9v1a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V9" /><path d="M12 12v3" /></svg>
+              </span>
+              <h3>公共注册表溯源</h3>
+              <p>对照 skills.sh 追踪技能的上游来源并比对内容，分清「自己写的」与「社区同名」。全程只发送技能名称。</p>
+            </article>
+            <article class="feature-card reveal">
+              <span class="feature-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 8 6 6" /><path d="m4 14 6-6 2-3" /><path d="M2 5h12" /><path d="M7 2h1" /><path d="m22 22-5-10-5 10" /><path d="M14 18h6" /></svg>
+              </span>
+              <h3>自带端点的流式翻译</h3>
+              <p>填入你的 OpenAI 兼容或 Anthropic 原生端点，整份 SKILL.md 流式翻译。密钥只存在本机，不经任何中间服务器。</p>
+            </article>
+          </div>
         </div>
       </section>
 
-      <section id="download" class="section-shell download-section" aria-labelledby="download-title">
-        <div class="section-intro compact">
-          <p class="eyebrow">Download</p>
-          <h2 id="download-title">下载桌面安装包</h2>
-          <p>从 GitHub Releases 获取 macOS、Windows 和 Linux 安装包。</p>
+      <!-- ============ 工作流 ============ -->
+      <section class="section section-alt" id="workflow">
+        <div class="container">
+          <header class="section-head reveal">
+            <span class="section-num" aria-hidden="true">02</span>
+            <p class="eyebrow">工作流 · Workflow</p>
+            <h2>从扫描到同步，三步成钢</h2>
+            <p class="section-lede">不需要学习成本：打开应用，技能已经在那里。</p>
+          </header>
+          <ol class="step-row">
+            <li class="step-card reveal">
+              <span class="step-num" aria-hidden="true">01</span>
+              <h3>扫描</h3>
+              <p>自动发现各 Agent 的技能目录，按 Agent、标签、星标归类浏览，支持全局搜索。</p>
+            </li>
+            <li class="step-card reveal">
+              <span class="step-num" aria-hidden="true">02</span>
+              <h3>锻造</h3>
+              <p>在内置 Markdown 编辑器里改写 SKILL.md：编码安全、标签管理、星标收藏，改坏可回滚。</p>
+            </li>
+            <li class="step-card reveal">
+              <span class="step-num" aria-hidden="true">03</span>
+              <h3>同步</h3>
+              <p>选一个目标 Agent 一键同步，哈希比对保证两边内容一致，差异永远先告诉你。</p>
+            </li>
+          </ol>
+          <div class="sync-legend reveal" role="list">
+            <p class="sync-legend-title" role="listitem">同步状态一览</p>
+            <p class="sync-item" role="listitem"><span class="state state-same" aria-hidden="true">＝</span>相同 — 内容一致，无需动作</p>
+            <p class="sync-item" role="listitem"><span class="state state-diff" aria-hidden="true">≠</span>不同 — 存在差异，确认后再覆盖</p>
+            <p class="sync-item" role="listitem"><span class="state state-miss" aria-hidden="true">○</span>缺失 — 目标 Agent 还没有该技能</p>
+          </div>
         </div>
-        <div class="download-grid">
-          <article>
-            <h3>macOS</h3>
-            <p>Universal DMG，适用于 Apple Silicon 和 Intel。</p>
-          </article>
-          <article>
-            <h3>Windows</h3>
-            <p>x64 Setup 或 MSI 安装包。</p>
-          </article>
-          <article>
-            <h3>Linux</h3>
-            <p>AppImage、deb 或 rpm。</p>
-          </article>
+      </section>
+
+      <!-- ============ 隐私 ============ -->
+      <section class="section" id="privacy">
+        <div class="container">
+          <header class="section-head reveal">
+            <span class="section-num" aria-hidden="true">03</span>
+            <p class="eyebrow">隐私 · Privacy</p>
+            <h2>本地优先，联网透明</h2>
+            <p class="section-lede">
+              没有账号体系，没有后台服务。技能文件始终留在各 Agent 的原目录；标签、快照、设置与翻译密钥都保存在本机应用数据目录的 SQLite
+              数据库里。整个应用只有下面三种情况会发起网络请求：
+            </p>
+          </header>
+          <div class="net-table-wrap reveal">
+            <table class="net-table">
+              <thead>
+                <tr>
+                  <th scope="col">场景</th>
+                  <th scope="col">何时发生</th>
+                  <th scope="col">发送内容与去向</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">检查更新</th>
+                  <td>启动时与手动检查</td>
+                  <td>向 GitHub Releases API 查询新版本号</td>
+                </tr>
+                <tr>
+                  <th scope="row">溯源比对</th>
+                  <td>仅当你点击「溯源」</td>
+                  <td>把技能<em>名称</em>发送到 skills.sh，并可能从 raw.githubusercontent.com 拉取候选 SKILL.md 比对内容，不上传文件</td>
+                </tr>
+                <tr>
+                  <th scope="row">翻译</th>
+                  <td>仅当你配置端点并触发</td>
+                  <td>把你选中的文档发送到<em>你自己配置</em>的端点</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="net-foot">除此之外，应用不建立任何其他网络连接。</p>
+          </div>
         </div>
-        <a class="primary-action download-link" href="https://github.com/LioraRndr/SkillAnvil/releases" target="_blank" rel="noreferrer">
-          打开 Releases
-        </a>
+      </section>
+
+      <!-- ============ Agent ============ -->
+      <section class="section section-alt" id="agents">
+        <div class="container">
+          <header class="section-head reveal">
+            <span class="section-num" aria-hidden="true">04</span>
+            <p class="eyebrow">支持 · Agents</p>
+            <h2>17 个内置 Agent，名单还在变长</h2>
+            <p class="section-lede">默认启用了最常见的四个；其余在设置里一键打开，或添加任意自定义技能目录。</p>
+          </header>
+          <ul class="agent-grid reveal">
+            <li class="agent-chip is-default">
+              <span class="agent-name">Claude Code</span>
+              <span class="agent-path">~/.claude/skills</span>
+              <span class="agent-flag">默认启用</span>
+            </li>
+            <li class="agent-chip is-default">
+              <span class="agent-name">Codex</span>
+              <span class="agent-path">~/.codex/skills</span>
+              <span class="agent-flag">默认启用</span>
+            </li>
+            <li class="agent-chip is-default">
+              <span class="agent-name">Kiro</span>
+              <span class="agent-path">~/.kiro/skills</span>
+              <span class="agent-flag">默认启用</span>
+            </li>
+            <li class="agent-chip is-default">
+              <span class="agent-name">Antigravity</span>
+              <span class="agent-path">~/.gemini/antigravity/skills</span>
+              <span class="agent-flag">默认启用</span>
+            </li>
+            <li class="agent-chip"><span class="agent-name">Kilo Code</span><span class="agent-path">~/.kilo/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Roo Code</span><span class="agent-path">~/.roo/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Goose</span><span class="agent-path">~/.config/goose/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">OpenClaw</span><span class="agent-path">~/.openclaw/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">TRAE IDE</span><span class="agent-path">~/.trae/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Cline</span><span class="agent-path">~/.cline/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Kimi Code CLI</span><span class="agent-path">~/.kimi-code/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">CodeBuddy</span><span class="agent-path">~/.codebuddy/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Junie</span><span class="agent-path">~/.junie/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">OpenHands</span><span class="agent-path">~/.openhands/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Qoder</span><span class="agent-path">~/.qoder/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Zencoder</span><span class="agent-path">~/.zencoder/skills</span></li>
+            <li class="agent-chip"><span class="agent-name">Hermes Agent</span><span class="agent-path">~/.hermes/skills</span></li>
+            <li class="agent-chip is-custom">
+              <span class="agent-name">＋ 任意自定义目录</span>
+              <span class="agent-path">在设置中添加路径，获得与内置 Agent 一致的能力</span>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ============ FAQ ============ -->
+      <section class="section" id="faq">
+        <div class="container container-narrow">
+          <header class="section-head reveal">
+            <span class="section-num" aria-hidden="true">05</span>
+            <p class="eyebrow">答疑 · FAQ</p>
+            <h2>常见问题</h2>
+          </header>
+          <div class="faq-list reveal">
+            <details class="faq-item">
+              <summary>首次打开被系统拦截怎么办？</summary>
+              <div class="faq-a">
+                <p>当前版本的安装包尚未做代码签名与公证，首次打开时 macOS 可能提示「已损坏」或「无法验证开发者」，Windows 会弹出 SmartScreen，这属于未签名软件的正常现象。按 README 的步骤放行一次即可：macOS 执行 <code>xattr -dr com.apple.quarantine /Applications/SkillAnvil.app</code> 或在「系统设置 → 隐私与安全性」点「仍要打开」；Windows 在 SmartScreen 里选择「更多信息 → 仍要运行」。</p>
+              </div>
+            </details>
+            <details class="faq-item">
+              <summary>我的技能文件会被上传吗？</summary>
+              <div class="faq-a">
+                <p>不会。技能文件只在本机被读取和写入。涉及网络的仅有三个场景——检查更新、溯源比对、翻译——都不会上传技能文件内容；溯源只发送技能名称，翻译只发往你自己配置的端点。</p>
+              </div>
+            </details>
+            <details class="faq-item">
+              <summary>翻译需要什么服务？</summary>
+              <div class="faq-a">
+                <p>自带端点（BYO）：任何 OpenAI 兼容接口或 Anthropic 原生接口都可以，在设置里填入地址、密钥与模型后即可流式翻译整份 SKILL.md。不配置端点就不会有任何翻译请求；密钥只保存在本机数据库。</p>
+              </div>
+            </details>
+            <details class="faq-item">
+              <summary>支持哪些操作系统？</summary>
+              <div class="faq-a">
+                <p>macOS（Apple Silicon 与 Intel 通用 DMG）、Windows x64（EXE 安装器与 MSI）、Linux（AppImage、deb、rpm），均可在 GitHub Releases 下载。</p>
+              </div>
+            </details>
+            <details class="faq-item">
+              <summary>数据都存在哪里？备份方便吗？</summary>
+              <div class="faq-a">
+                <p>技能文件仍在其所属 Agent 的原目录，不会搬家；标签、快照、设置与密钥保存在系统应用数据目录下的 SQLite 数据库中，复制该文件即可完成备份。</p>
+              </div>
+            </details>
+            <details class="faq-item">
+              <summary>列表里没有我用的 Agent？</summary>
+              <div class="faq-a">
+                <p>在设置中添加自定义技能目录即可，扫描、编辑、标签、快照与同步等能力和内置 Agent 完全一致。</p>
+              </div>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 下载 ============ -->
+      <section class="section section-cta" id="download">
+        <div class="container">
+          <div class="cta-box reveal">
+            <span class="section-num cta-num" aria-hidden="true">06</span>
+            <p class="eyebrow">下载 · Download</p>
+            <h2>把铁砧搬回本机</h2>
+            <p class="section-lede">免费、开源、跨平台。当前发布包未做代码签名，首次打开按 README 放行即可。</p>
+            <a class="btn btn-primary btn-lg" href="https://github.com/LioraRndr/SkillAnvil/releases/latest" target="_blank" rel="noopener">
+              前往 GitHub Releases 下载
+            </a>
+            <div class="dl-grid">
+              <div class="dl-card">
+                <p class="dl-os">macOS</p>
+                <p class="dl-note">Apple Silicon + Intel 通用</p>
+                <code>SkillAnvil_&lt;version&gt;_universal.dmg</code>
+              </div>
+              <div class="dl-card">
+                <p class="dl-os">Windows</p>
+                <p class="dl-note">x64 安装器</p>
+                <code>SkillAnvil_&lt;version&gt;_x64-setup.exe</code>
+                <code>SkillAnvil_&lt;version&gt;_x64_en-US.msi</code>
+              </div>
+              <div class="dl-card">
+                <p class="dl-os">Linux</p>
+                <p class="dl-note">amd64</p>
+                <code>SkillAnvil_&lt;version&gt;_amd64.AppImage</code>
+                <code>SkillAnvil_&lt;version&gt;_amd64.deb</code>
+                <code>SkillAnvil_&lt;version&gt;_x86_64.rpm</code>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
 
     <footer class="site-footer">
-      <span>SkillAnvil</span>
-      <a href="https://github.com/LioraRndr/SkillAnvil/blob/main/LICENSE" target="_blank" rel="noreferrer">MIT License</a>
+      <div class="container footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="#top">
+            <img class="brand-logo" src="./assets/skillanvil-logo.png" alt="" width="30" height="30" />
+            <span class="brand-word">SkillAnvil</span>
+          </a>
+          <p class="footer-tagline" lang="en">Local-first skill workbench for coding agents.</p>
+        </div>
+        <nav class="footer-col" aria-label="项目链接">
+          <p class="footer-head">项目</p>
+          <a href="https://github.com/LioraRndr/SkillAnvil" target="_blank" rel="noopener">GitHub 仓库</a>
+          <a href="https://github.com/LioraRndr/SkillAnvil/releases" target="_blank" rel="noopener">Releases</a>
+          <a href="https://github.com/LioraRndr/SkillAnvil/issues" target="_blank" rel="noopener">Issue 反馈</a>
+        </nav>
+        <div class="footer-col">
+          <p class="footer-head">信息</p>
+          <p><a href="https://github.com/LioraRndr/SkillAnvil/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a></p>
+          <p lang="en">Tauri 2 · Rust · React · SQLite</p>
+        </div>
+      </div>
+      <div class="container footer-bottom">
+        <p>© 2026 SkillAnvil contributors</p>
+        <p>在铁砧上，把技能打成趁手的形状。</p>
+      </div>
     </footer>
   </body>
 </html>

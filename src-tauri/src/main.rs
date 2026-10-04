@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent_installation;
+
 use chrono::{DateTime, Utc};
 use directories::ProjectDirs;
 use encoding_rs::{GBK, UTF_8};
@@ -7,13 +9,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::Write,
     net::IpAddr,
     path::{Component, Path, PathBuf},
     process::Command,
     sync::Mutex,
+    sync::OnceLock,
     time::Duration,
 };
 use tauri::{
@@ -190,6 +193,31 @@ struct AgentPathConfig {
     categories: Vec<SkillCategory>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HarnessCatalogEntry {
+    id: String,
+    name: String,
+    paths: Vec<String>,
+    #[serde(default)]
+    paths_windows: Option<Vec<String>>,
+    icon: String,
+    status: String,
+    docs: String,
+    enabled: bool,
+    flat_sync: bool,
+    #[serde(default)]
+    legacy_paths: Option<Vec<String>>,
+}
+
+fn harness_catalog() -> &'static [HarnessCatalogEntry] {
+    static CATALOG: OnceLock<Vec<HarnessCatalogEntry>> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        serde_json::from_str(include_str!("../../src/agent-catalog.json"))
+            .expect("bundled harness catalog must be valid")
+    })
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct SkillFilter {
@@ -343,6 +371,7 @@ fn main() {
             scan_agents,
             get_agents,
             get_skills,
+            get_skill,
             read_skill_file,
             save_skill_file,
             clone_skill,
@@ -359,6 +388,8 @@ fn main() {
             restore_snapshot,
             get_settings,
             update_settings,
+            detect_installed_agents,
+            enable_installed_agents,
             translate_markdown,
             translate_stream,
             test_translation_config,
@@ -416,12 +447,15 @@ fn setup_tray(app: &AppHandle) -> AppResult<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             "scan" => {
-                if let Some(state) = app.try_state::<AppState>() {
-                    if perform_scan(&state).is_ok() {
-                        // 通知前端从 DB 重载（前端只重载、不再触发二次扫描）。
-                        let _ = app.emit("scan-completed", ());
+                let app = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if perform_scan(&state).is_ok() {
+                            // 通知前端从 DB 重载（前端只重载、不再触发二次扫描）。
+                            let _ = app.emit("scan-completed", ());
+                        }
                     }
-                }
+                });
             }
             "quit" => app.exit(0),
             _ => {}
@@ -487,23 +521,35 @@ fn show_main_window(app: &AppHandle) {
 }
 
 #[tauri::command]
-fn scan_agents(state: State<AppState>) -> AppResult<ScanResult> {
-    perform_scan(&state)
+async fn scan_agents(app: AppHandle) -> AppResult<ScanResult> {
+    tauri::async_runtime::spawn_blocking(move || perform_scan(&app.state::<AppState>()))
+        .await
+        .map_err(|err| AppError::Message(format!("无法完成扫描：{err}")))?
 }
 
-#[tauri::command]
+// Commands that touch the disk or SQLite are marked `async` so Tauri runs them
+// on its thread pool. Plain sync commands execute on the main thread, where any
+// directory walk or busy-database wait freezes the whole window.
+#[tauri::command(async)]
 fn get_agents(state: State<AppState>) -> AppResult<Vec<Agent>> {
     let conn = open_db(&state.db_path)?;
     load_agents(&conn)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_skills(state: State<AppState>, filter: SkillFilter) -> AppResult<Vec<Skill>> {
     let conn = open_db(&state.db_path)?;
     load_skills(&conn, &filter)
 }
 
-#[tauri::command]
+/// Reload one skill after an edit without re-listing every installed skill.
+#[tauri::command(async)]
+fn get_skill(state: State<AppState>, skill_id: String) -> AppResult<Skill> {
+    let conn = open_db(&state.db_path)?;
+    find_skill(&conn, &skill_id)
+}
+
+#[tauri::command(async)]
 fn read_skill_file(
     state: State<AppState>,
     skill_id: String,
@@ -515,7 +561,7 @@ fn read_skill_file(
     read_text_file(&path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_skill_file(
     state: State<AppState>,
     skill_id: String,
@@ -563,8 +609,12 @@ fn save_skill_file(
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clone_skill(state: State<AppState>, skill_id: String, new_name: String) -> AppResult<Skill> {
+    let _guard = state
+        .lock
+        .lock()
+        .map_err(|_| AppError::Message("Lock poisoned".into()))?;
     let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     validate_name(&new_name)?;
@@ -612,44 +662,100 @@ fn skill_rel_path(agent: &Agent, skill_dir: &str) -> Option<String> {
     None
 }
 
-#[tauri::command]
+fn sync_destination(skill: &Skill, source: &Agent, target: &Agent) -> AppResult<PathBuf> {
+    let root = target
+        .skill_dir_paths
+        .first()
+        .filter(|root| !root.trim().is_empty())
+        .ok_or_else(|| AppError::Message("目标 Agent 没有可写路径。".into()))?;
+    let flat = harness_catalog()
+        .iter()
+        .find(|entry| entry.id == target.id)
+        .is_some_and(|entry| entry.flat_sync);
+    let relative = if flat {
+        skill.name.clone()
+    } else {
+        skill_rel_path(source, &skill.dir_path).unwrap_or_else(|| skill.name.clone())
+    };
+    let mut path = PathBuf::from(root);
+    for segment in relative.split('/') {
+        validate_name(segment)?;
+        path.push(segment);
+    }
+    Ok(path)
+}
+
+fn same_skill_directory(source: &Path, target: &Path) -> bool {
+    match (source.canonicalize(), target.canonicalize()) {
+        (Ok(source), Ok(target)) => source == target,
+        _ => false,
+    }
+}
+
+fn validate_harness_skill(skill: &Skill, target: &Agent) -> AppResult<()> {
+    if !harness_catalog()
+        .iter()
+        .any(|entry| entry.id == target.id && entry.flat_sync)
+    {
+        return Ok(());
+    }
+    let content = read_text_file(&Path::new(&skill.dir_path).join("SKILL.md"))?;
+    let (meta, _) = parse_frontmatter(&content.content);
+    let name = meta
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let description = meta
+        .get("description")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let portable = !name.is_empty()
+        && name.len() <= 64
+        && name == skill.name
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        });
+    if !portable || description.trim().is_empty() || description.chars().count() > 1024 {
+        return Err(AppError::Message(format!(
+            "{} 需要有效的 SKILL.md：name 为 1–64 位小写字母、数字或单连字符，description 为 1–1024 字。请先修正源文件。",
+            target.name
+        )));
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
 fn get_sync_targets(state: State<AppState>, skill_id: String) -> AppResult<Vec<SyncTargetStatus>> {
     let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     validate_name(&skill.name)?;
     let source_hash = hash_dir(Path::new(&skill.dir_path))?;
     let agents = load_agents(&conn)?;
-    // 嵌套 skill（如 <root>/gstack/qa）按源侧相对路径定位目标位置；
-    // 找不到 root 前缀时退回平铺到 skill 名。
-    let rel = agents
+    let source_agent = agents
         .iter()
         .find(|agent| agent.id == skill.agent_id)
-        .and_then(|agent| skill_rel_path(agent, &skill.dir_path))
-        .unwrap_or_else(|| skill.name.clone());
-    let segments: Vec<&str> = rel.split('/').collect();
-    for segment in &segments {
-        validate_name(segment)?;
-    }
+        .ok_or_else(|| AppError::Message("源 Agent 不存在，请重新扫描。".into()))?;
     let mut result = Vec::new();
-    for agent in agents {
+    for agent in &agents {
         if agent.id == skill.agent_id {
             continue;
         }
-        let target_root = agent.skill_dir_paths.first().cloned().unwrap_or_default();
-        let mut target = PathBuf::from(&target_root);
-        for segment in &segments {
-            target.push(segment);
-        }
+        let target = sync_destination(&skill, source_agent, agent)?;
         let status = if !target.exists() {
             "missing"
-        } else if hash_dir(&target)? == source_hash {
+        } else if same_skill_directory(Path::new(&skill.dir_path), &target)
+            || hash_dir(&target)? == source_hash
+        {
             "same"
         } else {
             "different"
         };
         result.push(SyncTargetStatus {
-            agent_id: agent.id,
-            agent_name: agent.name,
+            agent_id: agent.id.clone(),
+            agent_name: agent.name.clone(),
             target_path: target.to_string_lossy().to_string(),
             status: status.into(),
         });
@@ -657,56 +763,53 @@ fn get_sync_targets(state: State<AppState>, skill_id: String) -> AppResult<Vec<S
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn sync_skill(
     state: State<AppState>,
     skill_id: String,
     target_agent_ids: Vec<String>,
 ) -> AppResult<Vec<Skill>> {
+    let guard = state
+        .lock
+        .lock()
+        .map_err(|_| AppError::Message("Lock poisoned".into()))?;
     let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     validate_name(&skill.name)?;
     let source_agent = find_agent(&conn, &skill.agent_id)?;
-    // 嵌套 skill 同步到目标时保留相对路径（如 gstack/qa）；
-    // 找不到 root 前缀时退回平铺到 skill 名。
-    let rel = skill_rel_path(&source_agent, &skill.dir_path).unwrap_or_else(|| skill.name.clone());
-    let segments: Vec<String> = rel.split('/').map(str::to_string).collect();
-    for segment in &segments {
-        validate_name(segment)?;
-    }
+    let source = Path::new(&skill.dir_path);
+    let mut plans = Vec::new();
+    let mut destinations = HashSet::new();
+    // Validate every IPC target before writing to any of them.
     for agent_id in target_agent_ids {
         let agent = find_agent(&conn, &agent_id)?;
-        // 已知限制：目标 Agent 有多个 skill 根目录时，只写入第一个路径。
-        let root = agent
-            .skill_dir_paths
-            .first()
-            .ok_or_else(|| AppError::Message("目标 Agent 没有可写路径。".into()))?;
-        fs::create_dir_all(root)?;
-        let source = Path::new(&skill.dir_path);
-        let mut target = PathBuf::from(root);
-        for segment in &segments {
-            target.push(segment);
+        let target = sync_destination(&skill, &source_agent, &agent)?;
+        if same_skill_directory(source, &target) {
+            continue;
         }
-        // ensure_disjoint_paths 里的 resolved_path_for_comparison 需要 parent
-        // 已存在（canonicalize），因此必须先创建父目录。
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        validate_harness_skill(&skill, &agent)?;
         ensure_disjoint_paths(source, &target)?;
-        if target.exists() {
-            trash::delete(&target).map_err(|err| AppError::Message(err.to_string()))?;
+        if destinations.insert(resolved_path_for_comparison(&target)?) {
+            plans.push((agent, target));
         }
-        copy_dir_all(source, &target)?;
+    }
+    for (agent, target) in plans {
+        replace_skill_directory(source, &target)?;
         conn.execute(
             "insert into sync_logs(id, skill_id, target_agent_id, created_at) values(?1, ?2, ?3, ?4)",
             params![Uuid::new_v4().to_string(), skill_id, agent.id, now()],
         )?;
     }
+    drop(guard);
     perform_scan(&state).map(|result| result.skills)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn trash_skill(state: State<AppState>, skill_id: String, agent_ids: Vec<String>) -> AppResult<()> {
+    let _guard = state
+        .lock
+        .lock()
+        .map_err(|_| AppError::Message("Lock poisoned".into()))?;
     let conn = open_db(&state.db_path)?;
     let skill = find_skill(&conn, &skill_id)?;
     if !agent_ids.contains(&skill.agent_id) {
@@ -734,20 +837,33 @@ fn open_in_file_manager(path: String) -> AppResult<()> {
     show_path_in_file_manager(&target)
 }
 
+fn trusted_external_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && (url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com")
+        }) || harness_catalog()
+            .iter()
+            .any(|entry| reqwest::Url::parse(&entry.docs).is_ok_and(|docs| docs == *url)))
+}
+
 #[tauri::command]
 fn open_url(url: String) -> AppResult<()> {
     let parsed = validate_outbound_url(&url, false)?;
-    if !parsed.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com")
-    }) {
-        return Err(AppError::Message("仅允许打开受信任的 GitHub 链接。".into()));
+    if !trusted_external_url(&parsed) {
+        return Err(AppError::Message(
+            "仅允许打开 GitHub 或目录中列出的官方说明链接。".into(),
+        ));
     }
     open_external_url(parsed.as_str())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn star_skill(state: State<AppState>, skill_id: String, starred: bool) -> AppResult<Skill> {
     let conn = open_db(&state.db_path)?;
+    // Validate the id before writing so a stale card cannot leave an orphan row.
+    find_skill_row(&conn, &skill_id)?;
     conn.execute(
         "insert into skill_state(skill_id, starred) values(?1, ?2)
          on conflict(skill_id) do update set starred = excluded.starred",
@@ -756,28 +872,40 @@ fn star_skill(state: State<AppState>, skill_id: String, starred: bool) -> AppRes
     find_skill(&conn, &skill_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_skill_tags(state: State<AppState>, skill_id: String, tags: Vec<Tag>) -> AppResult<Skill> {
-    let conn = open_db(&state.db_path)?;
-    conn.execute(
+    let mut conn = open_db(&state.db_path)?;
+    find_skill_row(&conn, &skill_id)?;
+    replace_skill_tags(&mut conn, &skill_id, &tags)?;
+    find_skill(&conn, &skill_id)
+}
+
+/// Replace a skill's tag links atomically. Commands now run concurrently on the
+/// thread pool, so two quick tag edits must not interleave their delete/insert
+/// steps (that used to surface as a primary-key error and a half-applied set).
+/// Duplicate ids in one request are collapsed instead of failing the batch.
+fn replace_skill_tags(conn: &mut Connection, skill_id: &str, tags: &[Tag]) -> AppResult<()> {
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    transaction.execute(
         "delete from skill_tags where skill_id = ?1",
         params![skill_id],
     )?;
     for tag in tags {
-        conn.execute(
+        transaction.execute(
             "insert into tags(id, name, color) values(?1, ?2, ?3)
              on conflict(id) do update set name = excluded.name, color = excluded.color",
             params![tag.id, tag.name, tag.color],
         )?;
-        conn.execute(
-            "insert into skill_tags(skill_id, tag_id) values(?1, ?2)",
+        transaction.execute(
+            "insert or ignore into skill_tags(skill_id, tag_id) values(?1, ?2)",
             params![skill_id, tag.id],
         )?;
     }
-    find_skill(&conn, &skill_id)
+    transaction.commit()?;
+    Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_provenance(state: State<AppState>) -> AppResult<Vec<SkillProvenance>> {
     let conn = open_db(&state.db_path)?;
     load_provenance(&conn)
@@ -789,12 +917,13 @@ async fn trace_skill_provenance(
     skill_ids: Vec<String>,
 ) -> AppResult<Vec<SkillProvenance>> {
     // Resolve (id, name, local SKILL.md) up front, then release the DB connection.
+    // Look the batch up by id: this runs for every batch of a background trace,
+    // and loading the whole library here used to walk every skill directory.
     let targets: Vec<(String, String, String)> = {
         let conn = open_db(&state.db_path)?;
-        let all = load_skills(&conn, &SkillFilter::default())?;
         skill_ids
             .iter()
-            .filter_map(|id| all.iter().find(|s| &s.id == id))
+            .filter_map(|id| find_skill_row(&conn, id).ok())
             .map(|s| {
                 let local_md = read_text_file(&Path::new(&s.dir_path).join("SKILL.md"))
                     .map(|f| f.content)
@@ -1107,7 +1236,7 @@ fn upsert_provenance(conn: &Connection, p: &SkillProvenance) -> AppResult<()> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_snapshots(state: State<AppState>, skill_id: String) -> AppResult<Vec<Snapshot>> {
     let conn = open_db(&state.db_path)?;
     let mut stmt = conn.prepare(
@@ -1126,8 +1255,14 @@ fn get_snapshots(state: State<AppState>, skill_id: String) -> AppResult<Vec<Snap
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn restore_snapshot(state: State<AppState>, snapshot_id: String) -> AppResult<ReadFileResult> {
+    // Same lock as save_skill_file: a restore must never interleave with an
+    // autosave writing the same file from the thread pool.
+    let _guard = state
+        .lock
+        .lock()
+        .map_err(|_| AppError::Message("Lock poisoned".into()))?;
     let conn = open_db(&state.db_path)?;
     let snapshot: Snapshot = conn
         .query_row(
@@ -1152,27 +1287,105 @@ fn restore_snapshot(state: State<AppState>, snapshot_id: String) -> AppResult<Re
     read_text_file(&path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_settings(state: State<AppState>) -> AppResult<Settings> {
     load_settings(&state.db_path).map(redact_settings)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnableInstalledAgentsResult {
+    settings: Settings,
+    enabled_agent_ids: Vec<String>,
+}
+
 #[tauri::command]
-fn update_settings(
-    app: AppHandle,
-    state: State<AppState>,
+async fn detect_installed_agents(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<agent_installation::AgentInstallation>> {
+    let settings = load_settings(&state.db_path)?;
+    tauri::async_runtime::spawn_blocking(move || agent_installation::detect(&settings))
+        .await
+        .map_err(|err| AppError::Message(format!("无法完成安装检测：{err}")))
+}
+
+#[tauri::command]
+async fn enable_installed_agents(
+    state: State<'_, AppState>,
+    agent_ids: Vec<String>,
+) -> AppResult<EnableInstalledAgentsResult> {
+    if agent_ids.is_empty() || agent_ids.len() > harness_catalog().len() {
+        return Err(AppError::Message("请选择已确认安装的 Agent。".into()));
+    }
+    // Discover again on the backend; never trust a client-provided installation report.
+    let report = detect_installed_agents(state.clone()).await?;
+    let _guard = state
+        .lock
+        .lock()
+        .map_err(|_| AppError::Message("设置正在使用，请重试。".into()))?;
+    persist_enabled_agents(&state.db_path, &report, &agent_ids)
+}
+
+fn persist_enabled_agents(
+    db_path: &Path,
+    report: &[agent_installation::AgentInstallation],
+    ids: &[String],
+) -> AppResult<EnableInstalledAgentsResult> {
+    let mut conn = open_db(db_path)?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut settings = load_settings_from(&transaction)?;
+    let enabled_agent_ids = agent_installation::enable_selected(&mut settings, report, ids)?;
+    if !enabled_agent_ids.is_empty() {
+        transaction.execute(
+            "insert into settings(key, value) values('settings', ?1) on conflict(key) do update set value = excluded.value",
+            params![serde_json::to_string(&settings)?],
+        )?;
+    }
+    transaction.commit()?;
+    // This operation changes no shortcut or credentials and returns the usual redacted settings.
+    Ok(EnableInstalledAgentsResult {
+        settings: redact_settings(settings),
+        enabled_agent_ids,
+    })
+}
+
+#[tauri::command]
+async fn update_settings(app: AppHandle, settings: Settings) -> AppResult<Settings> {
+    // Waiting for an in-flight scan must not block the desktop event loop.
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _guard = state
+            .lock
+            .lock()
+            .map_err(|_| AppError::Message("设置正在使用，请重试。".into()))?;
+        persist_settings(&state.db_path, settings, |shortcut| {
+            register_shortcut(&app, shortcut)
+        })
+    })
+    .await
+    .map_err(|err| AppError::Message(format!("无法保存设置：{err}")))?
+}
+
+fn persist_settings(
+    db_path: &Path,
     mut settings: Settings,
+    register: impl FnOnce(&str) -> AppResult<()>,
 ) -> AppResult<Settings> {
-    let current = load_settings(&state.db_path)?;
+    let current = load_settings(db_path)?;
     reconcile_masked_api_key(&current.translation, &mut settings.translation);
-    register_shortcut(&app, &settings.shortcut)?;
-    let conn = open_db(&state.db_path)?;
-    conn.execute(
+    // Saving agent flags must work even when another instance owns the unchanged hotkey.
+    if current.shortcut != settings.shortcut {
+        register(&settings.shortcut)?;
+    }
+    let mut conn = open_db(db_path)?;
+    let transaction = conn.transaction()?;
+    transaction.execute(
         "insert into settings(key, value) values('settings', ?1)
          on conflict(key) do update set value = excluded.value",
         params![serde_json::to_string(&settings)?],
     )?;
-    reconcile_tags(&conn, &settings.custom_tags)?;
+    reconcile_tags(&transaction, &settings.custom_tags)?;
+    transaction.commit()?;
     Ok(redact_settings(settings))
 }
 
@@ -1813,7 +2026,7 @@ async fn list_translation_models(
 }
 
 /// 清空翻译缓存（translations 表全部行），返回删除的行数。
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_translation_cache(state: State<AppState>) -> AppResult<u64> {
     let conn = open_db(&state.db_path)?;
     let deleted = conn.execute("delete from translations", [])?;
@@ -1825,21 +2038,18 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
         .lock
         .lock()
         .map_err(|_| AppError::Message("Lock poisoned".into()))?;
-    let conn = open_db(&state.db_path)?;
-    let settings = load_settings(&state.db_path)?;
+    let mut conn = open_db(&state.db_path)?;
+    let settings = load_settings_from(&conn)?;
     let agents = detect_agents(&settings);
     let active_ids = agents
         .iter()
         .map(|agent| agent.id.clone())
         .collect::<Vec<_>>();
-    prune_inactive_agents(&conn, &active_ids)?;
-    for agent in &agents {
-        upsert_agent(&conn, agent)?;
-    }
-    let mut found = Vec::new();
     let mut scan_errors = Vec::new();
     let mut missing_roots = Vec::new();
+    let mut jobs: Vec<(&Agent, PathBuf)> = Vec::new();
     for agent in &agents {
+        let mut seen_directories = HashSet::new();
         for root in &agent.skill_dir_paths {
             let root_path = Path::new(root);
             if !root_path.exists() {
@@ -1848,36 +2058,108 @@ fn perform_scan(state: &AppState) -> AppResult<ScanResult> {
                 missing_roots.push(root.clone());
                 continue;
             }
-            for entry in WalkDir::new(root_path)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|entry| !is_ignored_dir(entry))
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
-            {
-                if let Some(dir) = entry.path().parent() {
-                    match scan_one_skill(agent, dir) {
-                        Ok(skill) => {
-                            upsert_skill(&conn, &skill)?;
-                            found.push(skill);
-                        }
-                        Err(err) => scan_errors.push(ScanIssue {
-                            path: entry.path().to_string_lossy().to_string(),
-                            message: err.to_string(),
-                        }),
-                    }
+            let (directories, errors) = discover_skill_directories(root_path);
+            scan_errors.extend(errors);
+            for dir in directories {
+                if seen_directories.insert(dir.canonicalize().unwrap_or_else(|_| dir.clone())) {
+                    jobs.push((agent, dir));
                 }
             }
         }
     }
-    let found_ids: Vec<String> = found.iter().map(|skill| skill.id.clone()).collect();
+    // Reading SKILL.md and listing files is pure filesystem work, so it runs in
+    // parallel; all database writes then land in one transaction instead of one
+    // implicit commit (and fsync) per skill.
+    let scanned = parallel_map(&jobs, |(agent, dir)| scan_one_skill(agent, dir));
+    let transaction = conn.transaction()?;
+    prune_inactive_agents(&transaction, &active_ids)?;
+    for agent in &agents {
+        upsert_agent(&transaction, agent)?;
+    }
+    let mut found_files = HashMap::new();
+    for ((_, dir), result) in jobs.iter().zip(scanned) {
+        match result {
+            Ok(skill) => {
+                upsert_skill(&transaction, &skill)?;
+                found_files.insert(skill.id, skill.files);
+            }
+            Err(err) => scan_errors.push(ScanIssue {
+                path: dir.join("SKILL.md").to_string_lossy().to_string(),
+                message: err.to_string(),
+            }),
+        }
+    }
+    let found_ids: Vec<String> = found_files.keys().cloned().collect();
     let error_paths: Vec<String> = scan_errors.iter().map(|issue| issue.path.clone()).collect();
-    prune_stale_skills(&conn, &found_ids, &missing_roots, &error_paths)?;
+    prune_stale_skills(&transaction, &found_ids, &missing_roots, &error_paths)?;
+    transaction.commit()?;
     Ok(ScanResult {
         agents: load_agents(&conn)?,
-        skills: load_skills(&conn, &SkillFilter::default())?,
+        // Reuse the file lists gathered above rather than walking every skill twice.
+        skills: load_skills_with_files(&conn, &SkillFilter::default(), found_files)?,
         scan_errors,
     })
+}
+
+/// Map `items` on a few scoped threads, preserving order. Small inputs stay on
+/// the calling thread because spawning would cost more than it saves.
+fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .min(8);
+    if items.len() < 16 || threads < 2 {
+        return items.iter().map(f).collect();
+    }
+    let chunk_size = items.len().div_ceil(threads);
+    let f = &f;
+    std::thread::scope(|scope| {
+        let handles = items
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(f).collect::<Vec<R>>()))
+            .collect::<Vec<_>>();
+        let mut results = Vec::with_capacity(items.len());
+        for handle in handles {
+            match handle.join() {
+                Ok(part) => results.extend(part),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+        results
+    })
+}
+
+fn discover_skill_directories(root: &Path) -> (Vec<PathBuf>, Vec<ScanIssue>) {
+    let mut directories = Vec::new();
+    let mut errors = Vec::new();
+    for result in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !is_ignored_dir(entry))
+    {
+        match result {
+            Ok(entry) if entry.file_type().is_file() && entry.file_name() == "SKILL.md" => {
+                if let Some(directory) = entry.path().parent() {
+                    directories.push(directory.to_path_buf());
+                }
+            }
+            // npx skills and other installers link individual bundles. Read the
+            // linked root without following arbitrary links inside the bundle.
+            Ok(entry)
+                if entry.file_type().is_symlink()
+                    && entry.path().is_dir()
+                    && entry.path().join("SKILL.md").is_file() =>
+            {
+                directories.push(entry.path().to_path_buf());
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(ScanIssue {
+                path: error.path().unwrap_or(root).to_string_lossy().to_string(),
+                message: error.to_string(),
+            }),
+        }
+    }
+    (directories, errors)
 }
 
 #[tauri::command]
@@ -1960,7 +2242,7 @@ async fn check_for_updates(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn dismiss_update(state: State<'_, AppState>, version: String) -> AppResult<()> {
     let conn = open_db(&state.db_path)?;
     conn.execute(
@@ -2122,11 +2404,7 @@ fn detect_agents(settings: &Settings) -> Vec<Agent> {
         .map(|config| Agent {
             id: config.id.clone(),
             name: config.name.clone(),
-            skill_dir_paths: config
-                .paths
-                .iter()
-                .map(|path| expand_home_path(path, &home))
-                .collect(),
+            skill_dir_paths: resolved_skill_roots(&config.paths, &home),
             icon: config.icon.clone().unwrap_or_else(|| "custom".into()),
             detected_at: now(),
         })
@@ -2233,6 +2511,50 @@ fn expand_home_path(path: &str, home: &Path) -> String {
     path.to_string()
 }
 
+fn expand_skill_root_with(
+    path: &str,
+    home: &Path,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> String {
+    let defaults = [
+        ("CLAUDE_CONFIG_DIR", ".claude"),
+        ("CODEX_HOME", ".codex"),
+        ("XDG_CONFIG_HOME", ".config"),
+        ("DSH_HOME", ".dsh"),
+        ("DSH_AGENTS_HOME", ".agents"),
+        ("GROK_HOME", ".grok"),
+        ("HERMES_HOME", ".hermes"),
+        ("KIMI_CODE_HOME", ".kimi-code"),
+        ("APPDATA", "AppData/Roaming"),
+    ];
+    for (variable, fallback) in defaults {
+        let prefix = format!("${variable}/");
+        if let Some(rest) = path.strip_prefix(&prefix) {
+            let base = get_env(variable)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| PathBuf::from(expand_home_path(&value, home)))
+                .filter(|value| value.is_absolute())
+                .unwrap_or_else(|| home.join(fallback));
+            return base.join(rest).to_string_lossy().to_string();
+        }
+    }
+    expand_home_path(path, home)
+}
+
+fn expand_skill_root(path: &str, home: &Path) -> String {
+    expand_skill_root_with(path, home, |variable| std::env::var(variable).ok())
+}
+
+fn resolved_skill_roots(paths: &[String], home: &Path) -> Vec<String> {
+    let mut seen = HashSet::new();
+    paths
+        .iter()
+        .map(|path| expand_skill_root(path, home))
+        .filter(|path| !path.trim().is_empty())
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
 fn scan_one_skill(agent: &Agent, dir: &Path) -> AppResult<Skill> {
     let main = dir.join("SKILL.md");
     let text = read_text_file(&main)?;
@@ -2271,11 +2593,15 @@ fn scan_one_skill(agent: &Agent, dir: &Path) -> AppResult<Skill> {
         .map(str::to_string)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "0.1.0".into());
-    let github_repo = read_meta_json(dir)?.and_then(|meta| {
-        meta.get("repo")
+    let meta_json = read_meta_json(dir)?;
+    let meta_string = |key: &str| {
+        meta_json
+            .as_ref()
+            .and_then(|meta| meta.get(key))
             .and_then(|value| value.as_str())
             .map(str::to_string)
-    });
+    };
+    let github_repo = meta_string("repo");
     let source = if github_repo.is_some() {
         "github"
     } else {
@@ -2292,16 +2618,8 @@ fn scan_one_skill(agent: &Agent, dir: &Path) -> AppResult<Skill> {
         agent_id: agent.id.clone(),
         source,
         github_repo,
-        github_branch: read_meta_json(dir)?.and_then(|meta| {
-            meta.get("branch")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        }),
-        last_sync_commit: read_meta_json(dir)?.and_then(|meta| {
-            meta.get("lastSyncCommit")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        }),
+        github_branch: meta_string("branch"),
+        last_sync_commit: meta_string("lastSyncCommit"),
         local_modified: false,
         starred: false,
         tags: vec![],
@@ -2325,39 +2643,52 @@ fn load_agents(conn: &Connection) -> AppResult<Vec<Agent>> {
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
+const SKILL_SELECT: &str =
+    "select s.id, s.name, s.display_name, s.description, s.version, s.dir_path, s.agent_id,
+            s.source, s.github_repo, s.github_branch, s.last_sync_commit, s.local_modified,
+            coalesce(st.starred, 0), s.updated_at
+     from skills s
+     left join skill_state st on st.skill_id = s.id";
+
+fn skill_from_row(row: &rusqlite::Row) -> rusqlite::Result<Skill> {
+    Ok(Skill {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        display_name: row.get(2)?,
+        description: row.get(3)?,
+        version: row.get(4)?,
+        dir_path: row.get(5)?,
+        agent_id: row.get(6)?,
+        source: row.get(7)?,
+        github_repo: row.get(8)?,
+        github_branch: row.get(9)?,
+        last_sync_commit: row.get(10)?,
+        local_modified: row.get::<_, i64>(11)? == 1,
+        starred: row.get::<_, i64>(12)? == 1,
+        tags: vec![],
+        files: vec![],
+        updated_at: row.get(13)?,
+    })
+}
+
 fn load_skills(conn: &Connection, filter: &SkillFilter) -> AppResult<Vec<Skill>> {
-    let mut stmt = conn.prepare(
-        "select s.id, s.name, s.display_name, s.description, s.version, s.dir_path, s.agent_id,
-                s.source, s.github_repo, s.github_branch, s.last_sync_commit, s.local_modified,
-                coalesce(st.starred, 0), s.updated_at
-         from skills s
-         left join skill_state st on st.skill_id = s.id
-         order by s.display_name",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Skill {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            display_name: row.get(2)?,
-            description: row.get(3)?,
-            version: row.get(4)?,
-            dir_path: row.get(5)?,
-            agent_id: row.get(6)?,
-            source: row.get(7)?,
-            github_repo: row.get(8)?,
-            github_branch: row.get(9)?,
-            last_sync_commit: row.get(10)?,
-            local_modified: row.get::<_, i64>(11)? == 1,
-            starred: row.get::<_, i64>(12)? == 1,
-            tags: vec![],
-            files: vec![],
-            updated_at: row.get(13)?,
-        })
-    })?;
-    let mut skills = rows.collect::<Result<Vec<_>, _>>()?;
+    load_skills_with_files(conn, filter, HashMap::new())
+}
+
+/// Load skill rows plus tags and file lists. `known_files` lets a fresh scan
+/// hand over the lists it already gathered; other skills are listed in parallel.
+fn load_skills_with_files(
+    conn: &Connection,
+    filter: &SkillFilter,
+    mut known_files: HashMap<String, Vec<SkillFile>>,
+) -> AppResult<Vec<Skill>> {
+    let mut stmt = conn.prepare(&format!("{SKILL_SELECT} order by s.display_name"))?;
+    let mut skills = stmt
+        .query_map([], skill_from_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tags = load_all_skill_tags(conn)?;
     for skill in &mut skills {
-        skill.tags = load_tags_for_skill(conn, &skill.id)?;
-        skill.files = list_skill_files(Path::new(&skill.dir_path)).unwrap_or_default();
+        skill.tags = tags.remove(&skill.id).unwrap_or_default();
     }
     skills.retain(|skill| {
         if filter
@@ -2389,14 +2720,69 @@ fn load_skills(conn: &Connection, filter: &SkillFilter) -> AppResult<Vec<Skill>>
         }
         true
     });
+    // Filter first so only the skills actually returned get their directory walked.
+    let mut pending = Vec::new();
+    for (index, skill) in skills.iter_mut().enumerate() {
+        match known_files.remove(&skill.id) {
+            Some(files) => skill.files = files,
+            None => pending.push((index, skill.dir_path.clone())),
+        }
+    }
+    let listed = parallel_map(&pending, |(_, dir)| {
+        list_skill_files(Path::new(dir)).unwrap_or_default()
+    });
+    for ((index, _), files) in pending.into_iter().zip(listed) {
+        skills[index].files = files;
+    }
     Ok(skills)
 }
 
+/// Tag links for every skill in one query (ordered by tag name, matching
+/// `load_tags_for_skill`) instead of one query per skill.
+fn load_all_skill_tags(conn: &Connection) -> AppResult<HashMap<String, Vec<Tag>>> {
+    let mut stmt = conn.prepare(
+        "select st.skill_id, t.id, t.name, t.color from tags t
+         join skill_tags st on st.tag_id = t.id
+         order by t.name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            Tag {
+                id: row.get(1)?,
+                name: row.get(2)?,
+                color: row.get(3)?,
+            },
+        ))
+    })?;
+    let mut tags: HashMap<String, Vec<Tag>> = HashMap::new();
+    for row in rows {
+        let (skill_id, tag) = row?;
+        tags.entry(skill_id).or_default().push(tag);
+    }
+    Ok(tags)
+}
+
+/// The skill row (with starred state) by id, without tags or files. Cheap
+/// enough for every IPC call that only needs to resolve a path.
+fn find_skill_row(conn: &Connection, id: &str) -> AppResult<Skill> {
+    conn.query_row(
+        &format!("{SKILL_SELECT} where s.id = ?1"),
+        params![id],
+        skill_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| AppError::Message("Skill 不存在，请重新扫描。".into()))
+}
+
+/// One skill by id with its tags and file list. Earlier versions loaded the
+/// whole library (walking every skill directory) just to pick one entry, which
+/// made opening, saving, starring and tagging scale with library size.
 fn find_skill(conn: &Connection, id: &str) -> AppResult<Skill> {
-    load_skills(conn, &SkillFilter::default())?
-        .into_iter()
-        .find(|skill| skill.id == id)
-        .ok_or_else(|| AppError::Message("Skill 不存在，请重新扫描。".into()))
+    let mut skill = find_skill_row(conn, id)?;
+    skill.tags = load_tags_for_skill(conn, &skill.id)?;
+    skill.files = list_skill_files(Path::new(&skill.dir_path)).unwrap_or_default();
+    Ok(skill)
 }
 
 fn find_agent(conn: &Connection, id: &str) -> AppResult<Agent> {
@@ -2476,6 +2862,10 @@ fn load_tags_for_skill(conn: &Connection, skill_id: &str) -> AppResult<Vec<Tag>>
 
 fn load_settings(db_path: &Path) -> AppResult<Settings> {
     let conn = open_db(db_path)?;
+    load_settings_from(&conn)
+}
+
+fn load_settings_from(conn: &Connection) -> AppResult<Settings> {
     let value: Option<String> = conn
         .query_row(
             "select value from settings where key = 'settings'",
@@ -2508,7 +2898,14 @@ fn normalize_settings(mut settings: Settings) -> Settings {
     for existing in settings.custom_agents {
         if let Some(target) = merged.iter_mut().find(|agent| agent.id == existing.id) {
             target.name = existing.name;
-            target.paths = existing.paths;
+            let legacy = harness_catalog()
+                .iter()
+                .find(|entry| entry.id == existing.id)
+                .and_then(|entry| entry.legacy_paths.as_ref());
+            // Only migrate the exact shipped defaults, preserving custom roots and order.
+            if !(existing.builtin && legacy == Some(&existing.paths)) {
+                target.paths = existing.paths;
+            }
             target.enabled = existing.enabled;
             target.icon = existing.icon.or_else(|| target.icon.clone());
             // 手动分类是用户数据，合并内置 agent 时必须保留，否则每次启动被清空。
@@ -2576,103 +2973,27 @@ fn default_true() -> bool {
 }
 
 fn default_agent_configs() -> Vec<AgentPathConfig> {
-    vec![
-        builtin_agent(
-            "claude-code",
-            "Claude Code",
-            &["~/.claude/skills"],
-            true,
-            "claude",
-        ),
-        builtin_agent("codex", "Codex", &["~/.codex/skills"], true, "codex"),
-        builtin_agent("kiro", "Kiro", &["~/.kiro/skills"], true, "kiro"),
-        builtin_agent(
-            "antigravity",
-            "Antigravity",
-            &["~/.gemini/antigravity/skills", "~/.antigravity/skills"],
-            true,
-            "antigravity",
-        ),
-        builtin_agent("kilo-code", "Kilo Code", &["~/.kilo/skills"], false, "kilo"),
-        builtin_agent(
-            "roo-code",
-            "Roo Code",
-            &["~/.roo/skills", "~/.roo-code/skills"],
-            false,
-            "roo",
-        ),
-        builtin_agent(
-            "goose",
-            "Goose",
-            &["~/.config/goose/skills", "~/.goose/skills"],
-            false,
-            "goose",
-        ),
-        builtin_agent(
-            "openclaw",
-            "OpenClaw",
-            &["~/.openclaw/skills"],
-            false,
-            "openclaw",
-        ),
-        builtin_agent("trae-ide", "TRAE IDE", &["~/.trae/skills"], false, "trae"),
-        builtin_agent("cline", "Cline", &["~/.cline/skills"], false, "cline"),
-        builtin_agent(
-            "kimi-code-cli",
-            "Kimi Code CLI",
-            &["~/.kimi-code/skills"],
-            false,
-            "kimi",
-        ),
-        builtin_agent(
-            "codebuddy",
-            "CodeBuddy",
-            &["~/.codebuddy/skills"],
-            false,
-            "codebuddy",
-        ),
-        builtin_agent("junie", "Junie", &["~/.junie/skills"], false, "junie"),
-        builtin_agent(
-            "openhands",
-            "OpenHands",
-            &["~/.openhands/skills"],
-            false,
-            "openhands",
-        ),
-        builtin_agent("qoder", "Qoder", &["~/.qoder/skills"], false, "qoder"),
-        builtin_agent(
-            "zencoder",
-            "Zencoder",
-            &["~/.zencoder/skills"],
-            false,
-            "zencoder",
-        ),
-        builtin_agent(
-            "hermes-agent",
-            "Hermes Agent",
-            &["~/.hermes/skills"],
-            false,
-            "hermes",
-        ),
-    ]
+    default_agent_configs_for_platform(cfg!(target_os = "windows"))
 }
 
-fn builtin_agent(
-    id: &str,
-    name: &str,
-    paths: &[&str],
-    enabled: bool,
-    icon: &str,
-) -> AgentPathConfig {
-    AgentPathConfig {
-        id: id.into(),
-        name: name.into(),
-        paths: paths.iter().map(|path| (*path).into()).collect(),
-        enabled,
-        builtin: true,
-        icon: Some(icon.into()),
-        categories: vec![],
-    }
+fn default_agent_configs_for_platform(windows: bool) -> Vec<AgentPathConfig> {
+    harness_catalog()
+        .iter()
+        .filter(|entry| entry.status == "native")
+        .map(|entry| AgentPathConfig {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            paths: if windows {
+                entry.paths_windows.as_ref().unwrap_or(&entry.paths).clone()
+            } else {
+                entry.paths.clone()
+            },
+            enabled: entry.enabled,
+            builtin: true,
+            icon: Some(entry.icon.clone()),
+            categories: vec![],
+        })
+        .collect()
 }
 
 fn read_text_file(path: &Path) -> AppResult<ReadFileResult> {
@@ -2797,10 +3118,12 @@ fn read_meta_json(dir: &Path) -> AppResult<Option<serde_json::Value>> {
 /// 保持副本完整。
 fn is_ignored_dir(entry: &walkdir::DirEntry) -> bool {
     entry.file_type().is_dir()
-        && entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name == "node_modules" || name == ".git")
+        && entry.file_name().to_str().is_some_and(|name| {
+            name == "node_modules"
+                || name == ".git"
+                || name.starts_with(".skillanvil-sync-")
+                || name.starts_with(".skillanvil-backup-")
+        })
 }
 
 fn list_skill_files(dir: &Path) -> AppResult<Vec<SkillFile>> {
@@ -3021,14 +3344,96 @@ fn resolved_path_for_comparison(path: &Path) -> AppResult<PathBuf> {
     if path.exists() {
         return Ok(path.canonicalize()?);
     }
-    let parent = path
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        missing.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| AppError::Message("无法解析目标目录。".into()))?
+                .to_owned(),
+        );
+        ancestor = ancestor
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| AppError::Message("目标 Skill 根目录必须是绝对路径。".into()))?;
+    }
+    let mut resolved = ancestor.canonicalize()?;
+    for segment in missing.into_iter().rev() {
+        resolved.push(segment);
+    }
+    Ok(resolved)
+}
+
+fn replace_skill_directory(source: &Path, target: &Path) -> AppResult<()> {
+    ensure_disjoint_paths(source, target)?;
+    if fs::symlink_metadata(target)
+        .is_ok_and(|meta| meta.file_type().is_symlink() || !meta.is_dir())
+    {
+        return Err(AppError::Message(
+            "目标不是普通 Skill 目录，已拒绝覆盖。".into(),
+        ));
+    }
+    let expected = if target.exists() {
+        Some(hash_dir(target)?)
+    } else {
+        None
+    };
+    let parent = target
         .parent()
-        .ok_or_else(|| AppError::Message("无法解析目标目录。".into()))?
-        .canonicalize()?;
-    let name = path
-        .file_name()
         .ok_or_else(|| AppError::Message("无法解析目标目录。".into()))?;
-    Ok(parent.join(name))
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(".skillanvil-sync-{}", Uuid::new_v4()));
+    let backup = parent.join(format!(".skillanvil-backup-{}", Uuid::new_v4()));
+    // Complete the copy before moving the old directory, so malformed sources
+    // or IO failures never discard the previous target.
+    if let Err(error) = copy_dir_all(source, &staging) {
+        if staging.exists() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        return Err(error);
+    }
+    let result = (|| -> AppResult<()> {
+        let current = if target.exists() {
+            Some(hash_dir(target)?)
+        } else {
+            None
+        };
+        if current != expected
+            || fs::symlink_metadata(target).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(AppError::Message(
+                "目标 Skill 已被外部修改，已取消同步。".into(),
+            ));
+        }
+        if expected.is_some() {
+            fs::rename(target, &backup)?;
+        }
+        if let Err(error) = fs::rename(&staging, target) {
+            if backup.exists() {
+                if let Err(restore_error) = fs::rename(&backup, target) {
+                    return Err(AppError::Message(format!(
+                        "同步失败：{error}；原目录保存在 {}，恢复失败：{restore_error}",
+                        backup.display()
+                    )));
+                }
+            }
+            return Err(error.into());
+        }
+        if backup.exists() {
+            trash::delete(&backup).map_err(|error| {
+                AppError::Message(format!(
+                    "同步已写入；旧副本保留在 {}，移入回收站失败：{error}",
+                    backup.display()
+                ))
+            })?;
+        }
+        Ok(())
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
 }
 
 fn ensure_disjoint_paths(source: &Path, target: &Path) -> AppResult<()> {
@@ -3043,6 +3448,10 @@ fn ensure_disjoint_paths(source: &Path, target: &Path) -> AppResult<()> {
 }
 
 fn copy_dir_all(source: &Path, target: &Path) -> AppResult<()> {
+    // A skill root may be an installer-created symlink. Resolve only that root;
+    // links inside the bundle remain prohibited by the checks below.
+    let resolved_source = source.canonicalize()?;
+    let source = resolved_source.as_path();
     ensure_disjoint_paths(source, target)?;
     if fs::symlink_metadata(target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(AppError::Message("拒绝复制到符号链接目录。".into()));
@@ -3169,6 +3578,328 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn harness_fixture() -> (PathBuf, Agent, Skill) {
+        let base = std::env::temp_dir().join(format!("skillanvil-harness-{}", Uuid::new_v4()));
+        let root = base.join("source");
+        let directory = root.join("bundle").join("test-skill");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test harness discovery.\n---\n\n# Test\n",
+        )
+        .unwrap();
+        let agent = Agent {
+            id: "codex".into(),
+            name: "Codex".into(),
+            skill_dir_paths: vec![root.to_string_lossy().into()],
+            icon: "codex".into(),
+            detected_at: now(),
+        };
+        let skill = scan_one_skill(&agent, &directory).unwrap();
+        (base, agent, skill)
+    }
+
+    #[test]
+    fn catalog_only_registers_harnesses_with_native_roots() {
+        let configs = default_agent_configs();
+        assert_eq!(configs.len(), 33);
+        assert!(!configs
+            .iter()
+            .any(|entry| entry.id == "aider" || entry.id == "workbuddy"));
+        assert!(configs.iter().all(|entry| !entry.paths.is_empty()));
+        let ids: HashSet<_> = configs.iter().map(|entry| &entry.id).collect();
+        assert_eq!(ids.len(), configs.len());
+        assert_eq!(
+            configs
+                .iter()
+                .find(|entry| entry.id == "kimi-code-cli")
+                .unwrap()
+                .paths[0],
+            "$KIMI_CODE_HOME/skills"
+        );
+        assert_eq!(
+            configs
+                .iter()
+                .find(|entry| entry.id == "opencode")
+                .unwrap()
+                .paths[0],
+            "$XDG_CONFIG_HOME/opencode/skills"
+        );
+    }
+
+    #[test]
+    fn official_documentation_links_remain_restricted() {
+        for entry in harness_catalog() {
+            let url = validate_outbound_url(&entry.docs, false).unwrap();
+            assert!(trusted_external_url(&url), "{}", entry.id);
+        }
+        for url in [
+            "https://example.com/",
+            "https://kiro.dev/other-page",
+            "https://kiro.dev/docs/skills/?redirect=example.com",
+            "https://github.com.example.com/",
+            "http://github.com/",
+            "https://user:pass@github.com/",
+        ] {
+            assert!(!trusted_external_url(&reqwest::Url::parse(url).unwrap()));
+        }
+        assert!(trusted_external_url(
+            &reqwest::Url::parse("https://github.com/SkillAnvil/SkillAnvil/releases").unwrap()
+        ));
+    }
+
+    #[test]
+    fn current_and_legacy_kimi_roots_are_distinct() {
+        let home = std::env::temp_dir().join("kimi-home");
+        let custom = home.join("isolated");
+        assert_eq!(
+            PathBuf::from(expand_skill_root_with(
+                "$KIMI_CODE_HOME/skills",
+                &home,
+                |_| None
+            )),
+            home.join(".kimi-code/skills")
+        );
+        assert_eq!(
+            PathBuf::from(expand_skill_root_with(
+                "$KIMI_CODE_HOME/skills",
+                &home,
+                |_| { Some(custom.to_string_lossy().into()) }
+            )),
+            custom.join("skills")
+        );
+        let catalog = harness_catalog();
+        assert_eq!(
+            catalog
+                .iter()
+                .find(|item| item.id == "kimi-cli-legacy")
+                .unwrap()
+                .paths[0],
+            "~/.kimi/skills"
+        );
+    }
+
+    #[test]
+    fn devin_cli_uses_appdata_only_on_windows() {
+        for (windows, expected) in [
+            (true, "$APPDATA/devin/skills"),
+            (false, "$XDG_CONFIG_HOME/devin/skills"),
+        ] {
+            let configs = default_agent_configs_for_platform(windows);
+            assert_eq!(
+                configs
+                    .iter()
+                    .find(|entry| entry.id == "devin-cli")
+                    .unwrap()
+                    .paths[0],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn exact_legacy_defaults_migrate_but_user_paths_survive() {
+        let mut settings = default_settings();
+        let kimi = settings
+            .custom_agents
+            .iter_mut()
+            .find(|entry| entry.id == "kimi-code-cli")
+            .unwrap();
+        kimi.paths = vec!["~/.kimi-code/skills".into()];
+        kimi.enabled = true;
+        let result = normalize_settings(settings);
+        let kimi = result
+            .custom_agents
+            .iter()
+            .find(|entry| entry.id == "kimi-code-cli")
+            .unwrap();
+        assert_eq!(kimi.paths[0], "$KIMI_CODE_HOME/skills");
+        assert!(kimi.enabled);
+        let mut customized = result.clone();
+        let kimi = customized
+            .custom_agents
+            .iter_mut()
+            .find(|entry| entry.id == "kimi-code-cli")
+            .unwrap();
+        kimi.paths = vec!["~/team/skills".into(), "~/.kimi-code/skills".into()];
+        let result = normalize_settings(customized);
+        assert_eq!(
+            result
+                .custom_agents
+                .iter()
+                .find(|entry| entry.id == "kimi-code-cli")
+                .unwrap()
+                .paths,
+            vec!["~/team/skills", "~/.kimi-code/skills"]
+        );
+    }
+
+    #[test]
+    fn path_variables_resolve_overrides_and_safe_defaults() {
+        let home = std::env::temp_dir().join("harness-home");
+        let custom = std::env::temp_dir().join("custom-config");
+        assert_eq!(
+            PathBuf::from(expand_skill_root_with(
+                "$XDG_CONFIG_HOME/opencode/skills",
+                &home,
+                |_| None
+            )),
+            home.join(".config/opencode/skills")
+        );
+        assert_eq!(
+            PathBuf::from(expand_skill_root_with("$CODEX_HOME/skills", &home, |_| {
+                Some(custom.to_string_lossy().into())
+            })),
+            custom.join("skills")
+        );
+        assert_eq!(
+            PathBuf::from(expand_skill_root_with("$CODEX_HOME/skills", &home, |_| {
+                Some("relative".into())
+            })),
+            home.join(".codex/skills")
+        );
+        assert_eq!(
+            expand_skill_root_with("$API_KEY/skills", &home, |_| panic!(
+                "must not read arbitrary env"
+            )),
+            "$API_KEY/skills"
+        );
+    }
+
+    #[test]
+    fn scan_root_deduplication_preserves_sync_priority() {
+        let home = std::env::temp_dir().join("harness-home");
+        let roots = resolved_skill_roots(
+            &[
+                "~/.kimi/skills".into(),
+                "".into(),
+                "~/.agents/skills".into(),
+                "~/.kimi/skills".into(),
+            ],
+            &home,
+        );
+        assert_eq!(
+            roots,
+            vec![
+                home.join(".kimi/skills").to_string_lossy(),
+                home.join(".agents/skills").to_string_lossy()
+            ]
+        );
+    }
+
+    #[test]
+    fn flat_harness_sync_is_discoverable_by_direct_child_glob() {
+        let (base, source, skill) = harness_fixture();
+        let mut target = source.clone();
+        target.id = "opencode".into();
+        target.skill_dir_paths = vec![base.join("target").to_string_lossy().into()];
+        let path = sync_destination(&skill, &source, &target).unwrap();
+        assert_eq!(path, base.join("target/test-skill"));
+        validate_harness_skill(&skill, &target).unwrap();
+        replace_skill_directory(Path::new(&skill.dir_path), &path).unwrap();
+        assert!(base.join("target/test-skill/SKILL.md").is_file());
+        assert!(!base.join("target/bundle/test-skill").exists());
+        target.id = "hermes-agent".into();
+        assert_eq!(
+            sync_destination(&skill, &source, &target).unwrap(),
+            base.join("target/bundle/test-skill")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn shared_skill_root_is_a_noop_and_empty_targets_are_rejected() {
+        let (base, source, skill) = harness_fixture();
+        let mut target = source.clone();
+        target.id = "hermes-agent".into();
+        let path = sync_destination(&skill, &source, &target).unwrap();
+        assert!(same_skill_directory(Path::new(&skill.dir_path), &path));
+        target.skill_dir_paths = vec!["".into()];
+        assert!(sync_destination(&skill, &source, &target).is_err());
+        assert!(Path::new(&skill.dir_path).join("SKILL.md").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn portable_harness_rejects_missing_metadata_before_copying() {
+        let (base, source, skill) = harness_fixture();
+        let mut target = source.clone();
+        target.id = "opencode".into();
+        fs::write(
+            Path::new(&skill.dir_path).join("SKILL.md"),
+            "# Plain Markdown",
+        )
+        .unwrap();
+        assert!(validate_harness_skill(&skill, &target).is_err());
+        assert!(!base.join("target").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn overlap_is_rejected_without_creating_missing_ancestors() {
+        let (base, _, skill) = harness_fixture();
+        let source = Path::new(&skill.dir_path);
+        let target = source.join("missing/nested/target");
+        assert!(ensure_disjoint_paths(source, &target).is_err());
+        assert!(!source.join("missing").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn link_test_directory(link: &Path, target: &Path) {
+        use std::os::windows::process::CommandExt;
+        let output = Command::new("cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(link.to_string_lossy().replace('/', "\\"))
+            .arg(target.to_string_lossy().replace('/', "\\"))
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction creation failed");
+    }
+    #[cfg(unix)]
+    fn link_test_directory(link: &Path, target: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[test]
+    fn linked_bundle_is_discovered_and_can_be_copied() {
+        let (base, _, skill) = harness_fixture();
+        let root = base.join("linked-root");
+        fs::create_dir_all(&root).unwrap();
+        let link = root.join("test-skill");
+        link_test_directory(&link, Path::new(&skill.dir_path));
+        let (dirs, errors) = discover_skill_directories(&root);
+        assert!(errors.is_empty());
+        assert_eq!(dirs, vec![link.clone()]);
+        copy_dir_all(&link, &base.join("copy")).unwrap();
+        assert!(base.join("copy/SKILL.md").is_file());
+        assert!(same_skill_directory(&link, Path::new(&skill.dir_path)));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_copy_preserves_existing_target_and_recovery_dirs_are_not_scanned() {
+        let (base, _, skill) = harness_fixture();
+        let target = base.join("target/test-skill");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SKILL.md"), "original target").unwrap();
+        link_test_directory(&Path::new(&skill.dir_path).join("unsafe-link"), &target);
+        assert!(replace_skill_directory(Path::new(&skill.dir_path), &target).is_err());
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "original target"
+        );
+        let backup = base.join("target/.skillanvil-backup-test");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("SKILL.md"), "old backup").unwrap();
+        assert_eq!(
+            discover_skill_directories(&base.join("target")).0,
+            vec![target]
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn compare_versions_orders_semver() {
@@ -3305,6 +4036,102 @@ mod tests {
         changed_endpoint.base_url = "https://attacker.example/v1".into();
         reconcile_masked_api_key(&current, &mut changed_endpoint);
         assert!(changed_endpoint.api_key.is_empty());
+    }
+
+    #[test]
+    fn saving_agent_flags_does_not_reregister_an_unchanged_shortcut() {
+        let base = std::env::temp_dir().join(format!("skillanvil-settings-{}", Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let mut current = load_settings(&db).unwrap();
+        current.translation.api_key = "fixture-api-key".into();
+        open_db(&db).unwrap().execute(
+            "insert into settings(key, value) values('settings', ?1) on conflict(key) do update set value = excluded.value",
+            params![serde_json::to_string(&current).unwrap()],
+        ).unwrap();
+
+        for enabled in [true, false] {
+            let mut incoming = redact_settings(load_settings(&db).unwrap());
+            incoming
+                .custom_agents
+                .iter_mut()
+                .find(|agent| agent.id == "qwen-code")
+                .unwrap()
+                .enabled = enabled;
+            let response = persist_settings(&db, incoming, |_| {
+                Err(AppError::Message("fixture hotkey is occupied".into()))
+            })
+            .expect("agent changes must save without registering the unchanged shortcut");
+            assert_eq!(
+                response
+                    .custom_agents
+                    .iter()
+                    .find(|agent| agent.id == "qwen-code")
+                    .unwrap()
+                    .enabled,
+                enabled
+            );
+            assert_eq!(response.translation.api_key, MASKED_API_KEY);
+            let stored = load_settings(&db).unwrap();
+            assert_eq!(
+                stored
+                    .custom_agents
+                    .iter()
+                    .find(|agent| agent.id == "qwen-code")
+                    .unwrap()
+                    .enabled,
+                enabled
+            );
+            assert_eq!(stored.translation.api_key, "fixture-api-key");
+            assert_eq!(stored.shortcut, current.shortcut);
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn a_changed_shortcut_is_registered_and_failure_preserves_settings() {
+        let base = std::env::temp_dir().join(format!("skillanvil-settings-{}", Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let current = load_settings(&db).unwrap();
+        let mut incoming = current.clone();
+        incoming.shortcut = "Ctrl+Shift+L".into();
+        incoming
+            .custom_agents
+            .iter_mut()
+            .find(|agent| agent.id == "qwen-code")
+            .unwrap()
+            .enabled = true;
+        let mut called = false;
+        let result = persist_settings(&db, incoming.clone(), |shortcut| {
+            called = true;
+            assert_eq!(shortcut, "Ctrl+Shift+L");
+            Err(AppError::Message("fixture hotkey is occupied".into()))
+        });
+        assert!(called);
+        assert!(result.is_err());
+        assert_eq!(
+            serde_json::to_value(load_settings(&db).unwrap()).unwrap(),
+            serde_json::to_value(&current).unwrap()
+        );
+        let response = persist_settings(&db, incoming, |shortcut| {
+            assert_eq!(shortcut, "Ctrl+Shift+L");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(response.shortcut, "Ctrl+Shift+L");
+        assert!(
+            load_settings(&db)
+                .unwrap()
+                .custom_agents
+                .iter()
+                .find(|agent| agent.id == "qwen-code")
+                .unwrap()
+                .enabled
+        );
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -3720,5 +4547,140 @@ mod tests {
         assert_eq!(count("select count(*) from tags"), 0);
         assert_eq!(count("select count(*) from skill_tags"), 0);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    fn tag(id: &str, name: &str) -> Tag {
+        Tag {
+            id: id.into(),
+            name: name.into(),
+            color: "#fff".into(),
+        }
+    }
+
+    fn library_fixture() -> (PathBuf, Connection, PathBuf) {
+        let base = std::env::temp_dir().join(format!("skillanvil-test-{}", Uuid::new_v4()));
+        let shared = base.join("shared-skill");
+        fs::create_dir_all(shared.join("references")).unwrap();
+        fs::write(shared.join("SKILL.md"), "# shared\n").unwrap();
+        fs::write(shared.join("references").join("notes.md"), "notes\n").unwrap();
+        let db = base.join("test.sqlite3");
+        init_db(&db).unwrap();
+        let conn = Connection::open(&db).unwrap();
+        (base, conn, shared)
+    }
+
+    // 性能回归：find_skill 按 id 直接取一行（含标签与文件），未知 id 报错，
+    // 不再借道全量 load_skills（那会遍历所有 Skill 目录）。
+    #[test]
+    fn find_skill_loads_only_the_requested_row() {
+        let (base, mut conn, shared) = library_fixture();
+        insert_test_skill_at(&conn, "wanted", &shared.to_string_lossy());
+        insert_test_skill_at(&conn, "other", &base.join("missing").to_string_lossy());
+        replace_skill_tags(&mut conn, "wanted", &[tag("z", "Zeta"), tag("a", "Alpha")]).unwrap();
+        conn.execute(
+            "insert into skill_state(skill_id, starred) values('wanted', 1)",
+            [],
+        )
+        .unwrap();
+
+        let skill = find_skill(&conn, "wanted").unwrap();
+        assert_eq!(skill.id, "wanted");
+        assert!(skill.starred);
+        let names: Vec<_> = skill.tags.iter().map(|tag| tag.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "Zeta"]);
+        let files: Vec<_> = skill
+            .files
+            .iter()
+            .map(|file| file.relative_path.as_str())
+            .collect();
+        assert_eq!(files, ["SKILL.md", "references", "references/notes.md"]);
+
+        let row = find_skill_row(&conn, "wanted").unwrap();
+        assert!(row.files.is_empty() && row.tags.is_empty());
+        assert!(find_skill(&conn, "nope").is_err());
+        assert!(find_skill_row(&conn, "nope").is_err());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    // 批量加载：标签一次查询按名称排序挂回各 Skill；共享同一目录的多个
+    // Skill（不同 Agent 指向同一根目录）都能拿到文件列表。
+    #[test]
+    fn load_skills_batches_tags_and_lists_shared_directories() {
+        let (base, mut conn, shared) = library_fixture();
+        insert_test_skill_at(&conn, "first", &shared.to_string_lossy());
+        insert_test_skill_at(&conn, "second", &shared.to_string_lossy());
+        replace_skill_tags(&mut conn, "first", &[tag("z", "Zeta"), tag("a", "Alpha")]).unwrap();
+        replace_skill_tags(&mut conn, "second", &[tag("z", "Zeta")]).unwrap();
+
+        let skills = load_skills(&conn, &SkillFilter::default()).unwrap();
+        assert_eq!(skills.len(), 2);
+        for skill in &skills {
+            assert_eq!(
+                skill.files.len(),
+                3,
+                "{} lists the shared directory",
+                skill.id
+            );
+        }
+        let first = skills.iter().find(|skill| skill.id == "first").unwrap();
+        let names: Vec<_> = first.tags.iter().map(|tag| tag.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "Zeta"]);
+
+        let tagged = load_skills(
+            &conn,
+            &SkillFilter {
+                tag_id: Some("a".into()),
+                ..SkillFilter::default()
+            },
+        )
+        .unwrap();
+        let ids: Vec<_> = tagged.iter().map(|skill| skill.id.as_str()).collect();
+        assert_eq!(ids, ["first"]);
+
+        // A fresh scan hands over its file lists; they are used as-is.
+        let mut known = HashMap::new();
+        known.insert("first".to_string(), Vec::new());
+        let reused = load_skills_with_files(&conn, &SkillFilter::default(), known).unwrap();
+        let first = reused.iter().find(|skill| skill.id == "first").unwrap();
+        let second = reused.iter().find(|skill| skill.id == "second").unwrap();
+        assert!(first.files.is_empty());
+        assert_eq!(second.files.len(), 3);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    // 并发回归：标签替换在一个事务里完成，重复 id 被合并而不是让整批失败。
+    #[test]
+    fn replace_skill_tags_is_atomic_and_collapses_duplicates() {
+        let (base, mut conn, shared) = library_fixture();
+        insert_test_skill_at(&conn, "s", &shared.to_string_lossy());
+        replace_skill_tags(
+            &mut conn,
+            "s",
+            &[tag("a", "A"), tag("a", "A"), tag("b", "B")],
+        )
+        .unwrap();
+        let count = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "select count(*) from skill_tags where skill_id = 's'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&conn), 2);
+        replace_skill_tags(&mut conn, "s", &[]).unwrap();
+        assert_eq!(count(&conn), 0);
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn parallel_map_preserves_input_order() {
+        let items: Vec<usize> = (0..257).collect();
+        let doubled = parallel_map(&items, |value| value * 2);
+        assert_eq!(
+            doubled,
+            items.iter().map(|value| value * 2).collect::<Vec<_>>()
+        );
+        assert!(parallel_map(&Vec::<usize>::new(), |value| *value).is_empty());
     }
 }

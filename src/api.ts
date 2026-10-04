@@ -2,6 +2,8 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   Agent,
+  AgentInstallation,
+  EnableInstalledAgentsResult,
   ReadFileResult,
   ScanIssue,
   Settings,
@@ -29,6 +31,8 @@ export const api = {
   scanAgents: () => call<{ agents: Agent[]; skills: Skill[]; scanErrors: ScanIssue[] }>("scan_agents"),
   getAgents: () => call<Agent[]>("get_agents"),
   getSkills: (filter: SkillFilter = {}) => call<Skill[]>("get_skills", { filter }),
+  // Re-read one skill (metadata, tags, file list) after editing it.
+  getSkill: (skillId: string) => call<Skill>("get_skill", { skillId }),
   readSkillFile: (skillId: string, relativePath: string) =>
     call<ReadFileResult>("read_skill_file", { skillId, relativePath }),
   // expectedUpdatedAt：读取该文件时返回的 ReadFileResult.updatedAt；后端写入前校验，
@@ -49,6 +53,9 @@ export const api = {
   getSnapshots: (skillId: string) => call<Snapshot[]>("get_snapshots", { skillId }),
   restoreSnapshot: (snapshotId: string) => call<ReadFileResult>("restore_snapshot", { snapshotId }),
   getSettings: () => call<Settings>("get_settings"),
+  detectInstalledAgents: () => call<AgentInstallation[]>("detect_installed_agents"),
+  enableInstalledAgents: (agentIds: string[]) =>
+    call<EnableInstalledAgentsResult>("enable_installed_agents", { agentIds }),
   updateSettings: (settings: Settings) => call<Settings>("update_settings", { settings }),
   // Sync the native window appearance to the in-app theme. On macOS the sidebar
   // vibrancy material (windowEffects "sidebar") renders light/dark according to

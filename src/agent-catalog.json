@@ -1,0 +1,710 @@
+[
+  {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "tier": 1,
+    "icon": "claude",
+    "paths": [
+      "$CLAUDE_CONFIG_DIR/skills"
+    ],
+    "projectPaths": [
+      ".claude/skills"
+    ],
+    "loading": "启动时发现名称和描述，相关时加载正文；可用 /技能名。项目和插件有独立作用域，云端需要仓库技能或账号同步。",
+    "docs": "https://code.claude.com/docs/en/skills",
+    "status": "native",
+    "enabled": true,
+    "flatSync": false,
+    "legacyPaths": [
+      "~/.claude/skills"
+    ]
+  },
+  {
+    "id": "cursor",
+    "name": "Cursor",
+    "tier": 1,
+    "icon": "cursor",
+    "paths": [
+      "~/.cursor/skills",
+      "~/.agents/skills",
+      "~/.claude/skills",
+      "~/.codex/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".cursor/skills",
+      ".claude/skills",
+      ".codex/skills"
+    ],
+    "loading": "启动时自动发现，按任务加载。远端和 Cloud Agent 需提交项目技能或使用 Cursor 的同步功能。",
+    "docs": "https://prod.cursor.com/docs/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "github-copilot",
+    "name": "GitHub Copilot",
+    "tier": 1,
+    "icon": "githubcopilot",
+    "paths": [
+      "~/.copilot/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".github/skills",
+      ".agents/skills",
+      ".claude/skills"
+    ],
+    "loading": "CLI、IDE Agent 和云端均支持；本机用户目录只作用于本机，云端使用仓库技能。CLI 项目同名技能优先。",
+    "docs": "https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/add-skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "tier": 1,
+    "icon": "codex",
+    "paths": [
+      "~/.agents/skills",
+      "$CODEX_HOME/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".codex/skills"
+    ],
+    "loading": "启动时发现并按需读取；可用 $技能名。共享目录与旧 Codex 目录并列扫描，远端运行需在对应环境安装。",
+    "docs": "https://developers.openai.com/codex/skills",
+    "status": "native",
+    "enabled": true,
+    "flatSync": false,
+    "legacyPaths": [
+      "~/.codex/skills"
+    ]
+  },
+  {
+    "id": "antigravity",
+    "name": "Antigravity IDE",
+    "tier": 1,
+    "icon": "antigravity",
+    "paths": [
+      "~/.gemini/config/skills",
+      "~/.gemini/antigravity/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".agent/skills"
+    ],
+    "loading": "2.0 使用 .gemini/config；旧 IDE 全局目录仍兼容。自动调用或 /技能名，在 Customizations 查看。",
+    "docs": "https://antigravity.google/docs/skills",
+    "status": "native",
+    "enabled": true,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.gemini/antigravity/skills",
+      "~/.antigravity/skills"
+    ]
+  },
+  {
+    "id": "antigravity-cli",
+    "name": "Antigravity CLI",
+    "tier": 1,
+    "icon": "antigravity",
+    "paths": [
+      "~/.gemini/antigravity-cli/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".agent/skills"
+    ],
+    "loading": "CLI 的全局目录独立于 IDE；启动时转成 /技能名，插件技能由 agy plugin 管理。",
+    "docs": "https://antigravity.google/docs/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "devin-desktop",
+    "name": "Devin Desktop",
+    "tier": 1,
+    "icon": "devin",
+    "paths": [
+      "$XDG_CONFIG_HOME/devin/skills",
+      "~/.codeium/windsurf/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".devin/skills",
+      ".windsurf/skills",
+      ".agents/skills"
+    ],
+    "loading": "Cascade 按需读取，支持 @技能名；旧 Windsurf 目录继续兼容。这些本地目录不代表 Devin 云端可见。",
+    "docs": "https://docs.devin.ai/desktop/cascade/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "devin-cli",
+    "name": "Devin CLI",
+    "tier": 1,
+    "icon": "devin",
+    "paths": [
+      "$XDG_CONFIG_HOME/devin/skills",
+      "~/.codeium/windsurf/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".devin/skills",
+      ".windsurf/skills",
+      ".agents/skills"
+    ],
+    "loading": "CLI 支持 SKILL.md；Windows 原生全局配置使用 APPDATA，Windsurf 其他发布通道目录可手动添加。",
+    "docs": "https://docs.devin.ai/cli/extensibility/skills/overview",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "pathsWindows": [
+      "$APPDATA/devin/skills",
+      "~/.codeium/windsurf/skills",
+      "~/.agents/skills"
+    ]
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "tier": 2,
+    "icon": "opencode",
+    "paths": [
+      "$XDG_CONFIG_HOME/opencode/skills",
+      "~/.agents/skills",
+      "~/.claude/skills"
+    ],
+    "projectPaths": [
+      ".opencode/skills",
+      ".agents/skills",
+      ".claude/skills"
+    ],
+    "loading": "原生 skill 工具按需读取；项目目录从工作目录向 Git 根查找。permission.skill 或禁用 skill 工具会影响可用性。",
+    "docs": "https://opencode.ai/docs/skills/",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "deepseek-harness",
+    "name": "DeepSeek Harness",
+    "tier": 2,
+    "icon": "deepseek",
+    "paths": [
+      "$DSH_HOME/skills",
+      "$DSH_AGENTS_HOME/skills"
+    ],
+    "projectPaths": [
+      ".dsh/skills",
+      ".agents/skills"
+    ],
+    "loading": "需要启用 filesystem skill provider 与 skill consumer；项目原生目录优先。目录包只扫描直接子目录，也支持根目录 .md 单文件，配置可覆盖 home 和额外目录。",
+    "docs": "https://deepseek-harness.github.io/deepseek-harness/en/reference/subsystems/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "gemini-cli",
+    "name": "Gemini CLI",
+    "tier": 2,
+    "icon": "geminicli",
+    "paths": [
+      "~/.agents/skills",
+      "~/.gemini/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".gemini/skills"
+    ],
+    "loading": "activate_skill 按需激活，客户端可能要求确认；项目优先，同作用域 .agents 优先。用 /skills list 和 /skills reload 检查。",
+    "docs": "https://geminicli.com/docs/cli/skills/",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "pi",
+    "name": "Pi",
+    "tier": 2,
+    "icon": "pi",
+    "paths": [
+      "~/.pi/agent/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".pi/skills",
+      ".agents/skills"
+    ],
+    "loading": "递归发现 SKILL.md，按需 read；用 /skill:名称 显式调用，/reload 刷新。额外路径由 settings 或 --skill 指定。",
+    "docs": "https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/skills.md",
+    "status": "native",
+    "enabled": false,
+    "flatSync": false
+  },
+  {
+    "id": "openhands",
+    "name": "OpenHands",
+    "tier": 2,
+    "icon": "openhands",
+    "paths": [
+      "~/.agents/skills",
+      "~/.openhands/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".openhands/skills"
+    ],
+    "loading": "当前推荐 .agents，旧 .openhands 兼容；项目优先。远端或 Docker 需要技能目录位于实际 backend 内；Canvas 还需启用对应技能。",
+    "docs": "https://docs.openhands.dev/overview/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.openhands/skills"
+    ]
+  },
+  {
+    "id": "cline",
+    "name": "Cline",
+    "tier": 2,
+    "icon": "cline",
+    "paths": [
+      "~/.cline/skills"
+    ],
+    "projectPaths": [
+      ".cline/skills",
+      ".clinerules/skills",
+      ".claude/skills"
+    ],
+    "loading": "通过 use_skill 按需读取，也可 /技能名；在 Skills 面板确认启用。官方文档注明同名全局技能优先。",
+    "docs": "https://docs.cline.bot/customization/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "goose",
+    "name": "Goose",
+    "tier": 2,
+    "icon": "goose",
+    "paths": [
+      "~/.agents/skills",
+      "$XDG_CONFIG_HOME/goose/skills",
+      "~/.claude/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".goose/skills",
+      ".claude/skills"
+    ],
+    "loading": "Skills 扩展按需加载；当前推荐 .agents，旧配置目录兼容。Recipe 与 SKILL.md 是不同的机制。",
+    "docs": "https://github.com/block/goose/blob/main/documentation/docs/guides/context-engineering/using-skills.md",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.config/goose/skills",
+      "~/.goose/skills"
+    ]
+  },
+  {
+    "id": "aider",
+    "name": "Aider",
+    "tier": 2,
+    "icon": "aider",
+    "paths": [],
+    "projectPaths": [],
+    "loading": "官方确认的是 aider --read <路径>/SKILL.md 或 /read；未确认原生自动发现技能目录。请在 Aider 显式加载文件。",
+    "docs": "https://aider.chat/docs/usage/conventions.html",
+    "status": "manual",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "warp",
+    "name": "Warp",
+    "tier": 2,
+    "icon": "warp",
+    "paths": [
+      "~/.agents/skills",
+      "~/.warp/skills",
+      "~/.claude/skills",
+      "~/.codex/skills",
+      "~/.cursor/skills",
+      "~/.gemini/skills",
+      "~/.copilot/skills",
+      "~/.factory/skills",
+      "~/.github/skills",
+      "~/.opencode/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".warp/skills",
+      ".claude/skills",
+      ".codex/skills",
+      ".cursor/skills",
+      ".gemini/skills",
+      ".copilot/skills"
+    ],
+    "loading": "按 cwd 向仓库根发现，支持 /技能名。自动解析同名技能时全局优先；本机文件不会作为 Warp Drive 云对象同步。",
+    "docs": "https://docs.warp.dev/agents/capabilities/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "kilo-code",
+    "name": "Kilo Code",
+    "tier": 2,
+    "icon": "kilo",
+    "paths": [
+      "~/.kilo/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".kilo/skills",
+      ".agents/skills"
+    ],
+    "loading": "启动或 /reload 发现，项目优先；Claude 目录需启用兼容配置。skills.paths 可添加额外目录。",
+    "docs": "https://kilo.ai/docs/customize/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.kilo/skills"
+    ]
+  },
+  {
+    "id": "qwen-code",
+    "name": "Qwen Code",
+    "tier": 2,
+    "icon": "qwen",
+    "paths": [
+      "~/.qwen/skills"
+    ],
+    "projectPaths": [
+      ".qwen/skills"
+    ],
+    "loading": "Skill 工具按需读取，/skills 打开列表与启用开关，/技能名 显式运行；name 和 description 必填。",
+    "docs": "https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "grok-build",
+    "name": "Grok Build",
+    "tier": 2,
+    "icon": "grok",
+    "paths": [
+      "$GROK_HOME/skills",
+      "~/.agents/skills",
+      "~/.claude/skills",
+      "~/.cursor/skills"
+    ],
+    "projectPaths": [
+      ".grok/skills",
+      ".agents/skills",
+      ".claude/skills",
+      ".cursor/skills"
+    ],
+    "loading": "启动发现，按名称去重，项目优先。Claude/Cursor 兼容可关闭；grok inspect 检查来源，额外目录由 skills.paths 配置。",
+    "docs": "https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/08-skills.md",
+    "status": "native",
+    "enabled": false,
+    "flatSync": false
+  },
+  {
+    "id": "kiro",
+    "name": "Kiro",
+    "tier": 3,
+    "icon": "kiro",
+    "paths": [
+      "~/.kiro/skills"
+    ],
+    "projectPaths": [
+      ".kiro/skills"
+    ],
+    "loading": "当前 IDE/CLI 按需读取，项目优先；旧 CLI 自定义 Agent 需在 resources 中配置 skill:// 路径。云端只使用仓库技能。",
+    "docs": "https://kiro.dev/docs/skills/",
+    "status": "native",
+    "enabled": true,
+    "flatSync": true
+  },
+  {
+    "id": "trae-ide",
+    "name": "TRAE 国际版",
+    "tier": 3,
+    "icon": "trae",
+    "paths": [
+      "~/.trae/skills"
+    ],
+    "projectPaths": [
+      ".trae/skills"
+    ],
+    "loading": "IDE 技能通过 SKILL.md 管理。国际版和国内版使用不同的用户目录，客户端需启用对应技能。",
+    "docs": "https://docs.trae.ai/ide/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "trae-cn",
+    "name": "TRAE 国内版",
+    "tier": 3,
+    "icon": "trae",
+    "paths": [
+      "~/.trae-cn/skills"
+    ],
+    "projectPaths": [
+      ".trae/skills"
+    ],
+    "loading": "国内版用户目录为 .trae-cn，项目目录仍是 .trae；名称含中文的 IDE 技能不能直接被 CLI 识别。",
+    "docs": "https://docs.trae.cn/cli_skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "trae-cli",
+    "name": "TRAE CLI",
+    "tier": 3,
+    "icon": "trae",
+    "paths": [
+      "~/.traecli/skills",
+      "~/.trae-cn/skills"
+    ],
+    "projectPaths": [
+      ".traecli/skills",
+      ".trae/skills"
+    ],
+    "loading": "CLI 原生目录为 .traecli，兼容国内 IDE 目录。创建或更新后重启，再用 /skills 检查。",
+    "docs": "https://docs.trae.cn/cli_skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "qoder",
+    "name": "Qoder",
+    "tier": 3,
+    "icon": "qoder",
+    "paths": [
+      "~/.qoder/skills"
+    ],
+    "projectPaths": [
+      ".qoder/skills"
+    ],
+    "loading": "自动调用或 /技能名。CLI 用 /skills reload 刷新；官方文档注明同名用户技能优先。QoderWork 另用 .qoderwork。",
+    "docs": "https://docs.qoder.com/cli/Skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "codebuddy",
+    "name": "CodeBuddy",
+    "tier": 3,
+    "icon": "codebuddy",
+    "paths": [
+      "~/.codebuddy/skills"
+    ],
+    "projectPaths": [
+      ".codebuddy/skills"
+    ],
+    "loading": "CLI 自动按任务调用，支持项目、用户和插件技能；插件更新用 /reload-plugins。CLI 的 CODEBUDDY_CONFIG_DIR 可改全局目录，请补入实际路径。WorkBuddy 是独立产品。",
+    "docs": "https://www.codebuddy.ai/docs/cli/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "kimi-code-cli",
+    "name": "Kimi Code CLI",
+    "tier": 3,
+    "icon": "kimi",
+    "paths": [
+      "$KIMI_CODE_HOME/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".kimi-code/skills",
+      ".agents/skills"
+    ],
+    "loading": "新版 Kimi Code：项目 > 用户 > extra_skill_dirs > 内置技能。用户目录随 KIMI_CODE_HOME 变化；目录包与根目录 .md 单文件均支持。旧版 Python kimi-cli 请选独立条目。",
+    "docs": "https://moonshotai.github.io/kimi-code/en/customization/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.kimi-code/skills"
+    ]
+  },
+  {
+    "id": "kimi-cli-legacy",
+    "name": "Kimi CLI（旧版 Python）",
+    "tier": 3,
+    "icon": "kimi",
+    "paths": [
+      "~/.kimi/skills",
+      "~/.config/agents/skills",
+      "~/.agents/skills",
+      "~/.claude/skills",
+      "~/.codex/skills"
+    ],
+    "projectPaths": [
+      ".kimi/skills",
+      ".agents/skills",
+      ".claude/skills",
+      ".codex/skills"
+    ],
+    "loading": "品牌组默认合并 kimi、claude、codex，kimi 同名优先；通用组在 .config/agents 与 .agents 中取首个存在目录。--skills-dir 会覆盖自动发现。",
+    "docs": "https://github.com/MoonshotAI/kimi-cli/blob/main/docs/en/customization/skills.md",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "junie",
+    "name": "Junie",
+    "tier": 3,
+    "icon": "junie",
+    "paths": [
+      "~/.junie/skills",
+      "~/.agents/skills"
+    ],
+    "projectPaths": [
+      ".junie/skills",
+      ".agents/skills"
+    ],
+    "loading": "IDE/CLI 支持，项目同名优先；/skills 查看启用状态。其他厂商目录是导入建议，不等于默认自动加载。",
+    "docs": "https://junie.jetbrains.com/docs/agent-skills.html",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.junie/skills"
+    ]
+  },
+  {
+    "id": "zencoder",
+    "name": "Zencoder / Zenflow",
+    "tier": 3,
+    "icon": "zencoder",
+    "paths": [
+      "~/.agents/skills",
+      "~/.zencoder/skills"
+    ],
+    "projectPaths": [
+      ".agents/skills",
+      ".claude/skills",
+      ".zencoder/skills"
+    ],
+    "loading": "当前推荐 .agents，旧 .zencoder 仍兼容；按描述加载，并可通过 paths 缩小适用范围。",
+    "docs": "https://docs.zencoder.ai/features/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.zencoder/skills"
+    ]
+  },
+  {
+    "id": "openclaw",
+    "name": "OpenClaw",
+    "tier": 3,
+    "icon": "openclaw",
+    "paths": [
+      "~/.openclaw/skills"
+    ],
+    "projectPaths": [
+      "skills"
+    ],
+    "loading": "通用 Agent：workspace/skills 优先于用户和内置技能；还会按依赖与配置过滤。自定义 workspace 必须添加真实 skills 路径。",
+    "docs": "https://docs.openclaw.ai/tools/skills",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "hermes-agent",
+    "name": "Hermes Agent",
+    "tier": 3,
+    "icon": "hermes",
+    "paths": [
+      "$HERMES_HOME/skills"
+    ],
+    "projectPaths": [
+      ".hermes/skills",
+      ".agents/skills"
+    ],
+    "loading": "原生目录递归加载；共享目录需配置 skills.external_dirs。项目技能要通过信任检查，各 profile 的 HERMES_HOME 独立。",
+    "docs": "https://hermes-agent.nousresearch.com/docs/user-guide/features/skills/",
+    "status": "native",
+    "enabled": false,
+    "flatSync": false,
+    "legacyPaths": [
+      "~/.hermes/skills"
+    ]
+  },
+  {
+    "id": "zcode",
+    "name": "ZCode",
+    "tier": 3,
+    "icon": "zcode",
+    "paths": [
+      "~/.zcode/skills"
+    ],
+    "projectPaths": [
+      ".zcode/skills"
+    ],
+    "loading": "在设置中刷新并启用，自动匹配描述；支持复制或符号链接导入。远端 SSH/WSL 需要 Sync Skill。",
+    "docs": "https://zcode.z.ai/en/docs/skill",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "workbuddy",
+    "name": "WorkBuddy",
+    "tier": 3,
+    "icon": "workbuddy",
+    "paths": [],
+    "projectPaths": [],
+    "loading": "官方确认内置技能、社区导入及自然语言创建。尚未找到稳定的自动扫描目录说明；请从客户端技能栏导入，并以实际安装位置配置自定义 Agent。",
+    "docs": "https://www.codebuddy.ai/docs/zh/workbuddy/From-Beginner-to-Expert-Guide/Practice-Cases/Create-Skills",
+    "status": "import",
+    "enabled": false,
+    "flatSync": true
+  },
+  {
+    "id": "roo-code",
+    "name": "Roo Code（兼容）",
+    "tier": 3,
+    "icon": "roo",
+    "paths": [
+      "~/.roo/skills"
+    ],
+    "projectPaths": [
+      ".roo/skills"
+    ],
+    "loading": "保留旧版目录管理；模式相关技能需添加真实 skills-<mode> 路径。项目维护状态与最新客户端能力需单独核对。",
+    "docs": "https://github.com/RooCodeInc/Roo-Code",
+    "status": "native",
+    "enabled": false,
+    "flatSync": true,
+    "legacyPaths": [
+      "~/.roo/skills",
+      "~/.roo-code/skills"
+    ]
+  }
+]
